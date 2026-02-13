@@ -15,7 +15,8 @@ setup(
     packages=find_packages(),
     entry_points={
         "console_scripts": [
-            'peerix = peerix.__main__:run'
+            'peerix = peerix.__main__:run',
+            'peerix-tracker = peerix.tracker_main:run',
         ]
     },
     version=version,

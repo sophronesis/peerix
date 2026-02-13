@@ -1,6 +1,7 @@
 { lib, config, pkgs, ... }:
 let
   cfg = config.services.peerix;
+  tcfg = cfg.tracker;
 in
 {
   options = with lib; {
@@ -75,91 +76,236 @@ in
         defaultText = literalExpression "pkgs.peerix";
         description = "The package to use for peerix";
       };
+
+      mode = lib.mkOption {
+        type = types.enum [ "lan" "wan" "both" ];
+        default = "lan";
+        description = ''
+          Discovery mode: lan (UDP broadcast), wan (tracker-based), or both.
+        '';
+      };
+
+      trackerUrl = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          URL of the peerix tracker server. Required for wan and both modes.
+        '';
+      };
+
+      upstreamCache = lib.mkOption {
+        type = types.str;
+        default = "https://cache.nixos.org";
+        description = ''
+          Upstream cache URL for hash verification.
+        '';
+      };
+
+      filterPatterns = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''
+          Additional fnmatch patterns to exclude from WAN sharing.
+        '';
+      };
+
+      noFilter = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Disable heuristic filtering of system/sensitive derivations entirely.
+        '';
+      };
+
+      noDefaultFilters = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Keep filtering enabled but skip built-in default patterns.
+        '';
+      };
+
+      noVerify = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Disable hash verification against upstream cache.
+        '';
+      };
+
+      peerId = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Unique peer ID. Auto-generated if null.
+        '';
+      };
+
+      tracker = {
+        enable = lib.mkEnableOption "peerix tracker";
+
+        port = lib.mkOption {
+          type = types.int;
+          default = 12305;
+          description = "Port for the tracker server.";
+        };
+
+        dbPath = lib.mkOption {
+          type = types.str;
+          default = "/var/lib/peerix-tracker/tracker.db";
+          description = "Path to the tracker SQLite database.";
+        };
+
+        openFirewall = lib.mkOption {
+          type = types.bool;
+          default = true;
+          description = "Whether to open the firewall for the tracker port.";
+        };
+      };
     };
   };
 
-  config = lib.mkIf (cfg.enable) {
-    systemd.services.peerix = {
-      enable = true;
-      description = "Local p2p nix caching daemon";
-      wantedBy = ["multi-user.target"];
-      serviceConfig = {
-        Type = "simple";
+  config = lib.mkMerge [
+    (lib.mkIf (cfg.enable) {
+      systemd.services.peerix = {
+        enable = true;
+        description = "Local p2p nix caching daemon";
+        wantedBy = ["multi-user.target"];
+        serviceConfig = {
+          Type = "simple";
 
-        User = cfg.user;
-        Group = cfg.group;
+          User = cfg.user;
+          Group = cfg.group;
 
-        PrivateMounts = true;
-        PrivateDevices = true;
-        PrivateTmp = true;
-        PrivateIPC = true;
-        PrivateUsers = true;
+          PrivateMounts = true;
+          PrivateDevices = true;
+          PrivateTmp = true;
+          PrivateIPC = true;
+          PrivateUsers = true;
 
-        SystemCallFilters = [
-          "@aio"
-          "@basic-io"
-          "@file-system"
-          "@io-event"
-          "@process"
-          "@network-io"
-          "@timer"
-          "@signal"
-          "@alarm"
-        ];
-        SystemCallErrorNumber = "EPERM";
+          SystemCallFilters = [
+            "@aio"
+            "@basic-io"
+            "@file-system"
+            "@io-event"
+            "@process"
+            "@network-io"
+            "@timer"
+            "@signal"
+            "@alarm"
+          ];
+          SystemCallErrorNumber = "EPERM";
 
-        ProtectSystem = "full";
-        ProtectHome = true;
-        ProtectHostname = true;
-        ProtectClock = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        RestrictNamespaces = "";
+          ProtectSystem = "full";
+          ProtectHome = true;
+          ProtectHostname = true;
+          ProtectClock = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = "";
 
-        NoNewPrivileges = true;
-        ReadOnlyPaths = lib.mkMerge [
-          ([
-            "/nix/var"
+          NoNewPrivileges = true;
+          ReadOnlyPaths = lib.mkMerge [
+            ([
+              "/nix/var"
+              "/nix/store"
+            ])
+
+            (lib.mkIf (cfg.privateKeyFile != null) [
+              cfg.privateKeyFile
+            ])
+          ];
+          ExecPaths = [
             "/nix/store"
-          ])
-
-          (lib.mkIf (cfg.privateKeyFile != null) [
-            cfg.privateKeyFile
-          ])
-        ];
-        ExecPaths = [
-          "/nix/store"
-        ];
-        Environment = lib.mkIf (cfg.privateKeyFile != null) [
-          "NIX_SECRET_KEY_FILE=${cfg.privateKeyFile}"
-        ];
+          ];
+          Environment = lib.mkIf (cfg.privateKeyFile != null) [
+            "NIX_SECRET_KEY_FILE=${cfg.privateKeyFile}"
+          ];
+        };
+        script = let
+          modeArgs = "--mode ${cfg.mode}";
+          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
+          verifyArgs = lib.optionalString cfg.noVerify "--no-verify";
+          upstreamArgs = lib.optionalString (cfg.upstreamCache != "https://cache.nixos.org")
+            "--upstream-cache ${cfg.upstreamCache}";
+          filterArgs = lib.optionalString cfg.noFilter "--no-filter";
+          defaultFilterArgs = lib.optionalString cfg.noDefaultFilters "--no-default-filters";
+          patternArgs = lib.optionalString (cfg.filterPatterns != [])
+            "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
+          peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
+        in ''
+          exec ${cfg.package}/bin/peerix \
+            ${modeArgs} \
+            ${trackerArgs} \
+            ${verifyArgs} \
+            ${upstreamArgs} \
+            ${filterArgs} \
+            ${defaultFilterArgs} \
+            ${patternArgs} \
+            ${peerIdArgs}
+        '';
       };
-      script = ''
-        exec ${cfg.package}/bin/peerix
-      '';
-    };
 
-    nix = {
-      settings = {
-        substituters = [
-          "http://127.0.0.1:12304/"
-        ];
-        trusted-public-keys = [
-          (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
-          (lib.mkIf (cfg.publicKey != null) cfg.publicKey)
-        ];
+      nix = {
+        settings = {
+          substituters = [
+            "http://127.0.0.1:12304/"
+          ];
+          trusted-public-keys = [
+            (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
+            (lib.mkIf (cfg.publicKey != null) cfg.publicKey)
+          ];
+        };
+        extraOptions = lib.mkIf (cfg.globalCacheTTL != null) ''
+          narinfo-cache-negative-ttl = ${toString cfg.globalCacheTTL}
+          narinfo-cache-positive-ttl = ${toString cfg.globalCacheTTL}
+        '';
       };
-      extraOptions = lib.mkIf (cfg.globalCacheTTL != null) ''
-        narinfo-cache-negative-ttl = ${toString cfg.globalCacheTTL}
-        narinfo-cache-positive-ttl = ${toString cfg.globalCacheTTL}
-      '';
-    };
 
-    networking.firewall = lib.mkIf (cfg.openFirewall) {
-      allowedTCPPorts = [ 12304 ];
-      allowedUDPPorts = [ 12304 ];
-    };
-  };
+      networking.firewall = lib.mkIf (cfg.openFirewall) {
+        allowedTCPPorts = [ 12304 ];
+        allowedUDPPorts = [ 12304 ];
+      };
+    })
+
+    (lib.mkIf (tcfg.enable) {
+      systemd.services.peerix-tracker = {
+        enable = true;
+        description = "Peerix tracker server for WAN peer discovery";
+        wantedBy = ["multi-user.target"];
+        serviceConfig = {
+          Type = "simple";
+          StateDirectory = "peerix-tracker";
+
+          DynamicUser = true;
+
+          PrivateDevices = true;
+          PrivateTmp = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ProtectHostname = true;
+          ProtectClock = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          NoNewPrivileges = true;
+
+          ReadWritePaths = [ (builtins.dirOf tcfg.dbPath) ];
+          ExecPaths = [ "/nix/store" ];
+        };
+        script = ''
+          exec ${cfg.package}/bin/peerix-tracker \
+            --port ${toString tcfg.port} \
+            --db-path ${tcfg.dbPath}
+        '';
+      };
+
+      networking.firewall = lib.mkIf (tcfg.openFirewall) {
+        allowedTCPPorts = [ tcfg.port ];
+      };
+    })
+  ];
 }

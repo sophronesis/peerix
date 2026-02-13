@@ -33,10 +33,18 @@
           ] ++ packages;
         };
 
-        peerix = pkgs.writeShellScriptBin "peerix" ''
-          PATH=${pkgs.nix}/bin:${pkgs.nix-serve}:$PATH
-          exec ${peerix-unwrapped}/bin/peerix "$@"
-        '';
+        peerix = pkgs.symlinkJoin {
+          name = "peerix";
+          paths = [
+            (pkgs.writeShellScriptBin "peerix" ''
+              PATH=${pkgs.nix}/bin:${pkgs.nix-serve}:$PATH
+              exec ${peerix-unwrapped}/bin/peerix "$@"
+            '')
+            (pkgs.writeShellScriptBin "peerix-tracker" ''
+              exec ${peerix-unwrapped}/bin/peerix-tracker "$@"
+            '')
+          ];
+        };
       };
 
       defaultPackage = self.packages.${system}.peerix;
