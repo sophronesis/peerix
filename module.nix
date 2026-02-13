@@ -72,7 +72,7 @@ in
 
       package = mkOption {
         type = types.package;
-        default = (import ./default.nix).default or pkgs.peerix;
+        default = pkgs.peerix;
         defaultText = literalExpression "pkgs.peerix";
         description = "The package to use for peerix";
       };

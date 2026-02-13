@@ -11,7 +11,10 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, ... }: {
-    nixosModules.peerix = import ./module.nix;
+    nixosModules.peerix = { pkgs, ... }: {
+      nixpkgs.overlays = [ (import ./overlay.nix { inherit self; }) ];
+      imports = [ ./module.nix ];
+    };
     overlay = import ./overlay.nix { inherit self; };
   } // flake-utils.lib.eachDefaultSystem (system:
     let
