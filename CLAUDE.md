@@ -11,7 +11,7 @@ Peerix is a peer-to-peer binary cache for Nix. It supports two discovery modes:
 
 ## Build & Run
 
-This is a Nix flake project with a Python (3.9) application:
+This is a Nix flake project with a Python (3.12) application:
 
 ```bash
 # Enter dev shell (provides nix-serve, niv, python with deps)

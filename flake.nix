@@ -19,7 +19,7 @@
   } // flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = nixpkgs.legacyPackages.${system};
-      python = pkgs.python39;
+      python = pkgs.python312;
       packages = map (pkg: python.pkgs.${pkg}) (builtins.filter (v: builtins.isString v && (builtins.stringLength v) > 0) (builtins.split "\n" (builtins.readFile ./requirements.txt)));
     in {
       packages = rec {
@@ -27,9 +27,12 @@
           pname = "peerix";
           version = builtins.replaceStrings [ " " "\n" ] [ "" "" ] (builtins.readFile ./VERSION);
           src = ./.;
+          pyproject = true;
 
           doCheck = false;
-    
+
+          build-system = [ python.pkgs.setuptools ];
+
           propagatedBuildInputs = with pkgs; [
             nix
             nix-serve

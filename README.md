@@ -152,5 +152,5 @@ Network Protocol
 Dependencies
 ------------
 
-- Python 3.9+: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `pynacl` (optional, for narinfo signing)
+- Python 3.12+: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `pynacl` (optional, for narinfo signing)
 - System: `nix`, `nix-serve`
