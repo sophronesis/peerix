@@ -30,6 +30,14 @@ nix run . -- --mode wan --tracker-url http://tracker:12305 --verbose
 # Run with signing
 NIX_SECRET_KEY_FILE=/path/to/key.pem nix run . -- --verbose
 
+# Run with SSH key authentication (stable peer ID + signed requests)
+nix run . -- --mode wan --tracker-url http://tracker:12305 \
+  --ssh-public-key /etc/ssh/ssh_host_ed25519_key.pub \
+  --ssh-private-key /etc/ssh/ssh_host_ed25519_key --verbose
+
+# Run with auto-detected SSH public key (peer ID only, no signing)
+nix run . -- --ssh-public-key --verbose
+
 # Run tracker
 nix run . -- --tracker  # or: peerix-tracker --port 12305
 
@@ -46,16 +54,18 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 ### Key modules (`peerix/`)
 
 - **`store.py`** — Base `Store` class and data models (`NarInfo`, `CacheInfo` NamedTuples with `parse()`/`dump()` serialization). All stores implement `cache_info()`, `narinfo(hash)`, and `nar(url)`. The `NarInfo.parse()` skips lines without `:` to handle empty lines gracefully.
-- **`local.py`** — `LocalStore`: launches `nix-serve` on a Unix socket, proxies narinfo requests to it, and streams NARs via `nix-store --dump`. The `local()` context manager handles the nix-serve subprocess lifecycle. Important: `NIX_SECRET_KEY_FILE` is stripped from nix-serve's env to avoid Perl crashes — signing is handled by peerix itself in `app.py`.
-- **`remote.py`** — `DiscoveryProtocol`: a UDP datagram protocol that broadcasts narinfo requests to all private-network broadcast addresses, waits for peer responses (with configurable timeout), then fetches narinfo/NAR data over HTTP from the responding peer. Implements the `Store` interface.
-- **`wan.py`** — `TrackerStore`: WAN peer discovery via tracker. Queries tracker for peers, fetches narinfo from peers via HTTP, rewrites NAR URLs to route through the local WAN endpoint. Streams NARs with transfer tracking for reputation.
-- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry (announce/heartbeat), peer listing, transfer initiation, and transfer reporting for reputation.
-- **`tracker_client.py`** — Client for the tracker. Handles heartbeat announcements, peer listing, transfer init/reporting. Supports `announce_addr` for NAT scenarios where auto-detected IP is wrong.
+- **`net_validation.py`** — Address validation utilities. `is_safe_peer_address(addr)` blocks loopback, link-local, metadata (169.254.169.254), multicast, unspecified (does NOT block private RFC1918). `is_safe_lan_address(addr)` adds a `is_private` requirement. `is_localhost(host)` checks `127.0.0.1`, `::1`, loopback.
+- **`peer_identity.py`** — SSH ed25519 key-based peer identity and request signing. Parses SSH public/private key formats, derives stable `peer_id` from `base64url(SHA256(pubkey))`. `PeerIdentity` dataclass holds `peer_id`, raw public key, and `SigningKey`. `sign_request()` / `verify_request()` for cryptographic request authentication with timestamp freshness (5 min window).
+- **`local.py`** — `LocalStore`: launches `nix-serve` on a Unix socket, proxies narinfo requests to it, and streams NARs via `nix-store --dump`. The `local()` context manager handles the nix-serve subprocess lifecycle. Important: `NIX_SECRET_KEY_FILE` is stripped from nix-serve's env to avoid Perl crashes — signing is handled by peerix itself in `app.py`. Path traversal protection via `os.path.realpath()` + trailing-slash check.
+- **`remote.py`** — `DiscoveryProtocol`: a UDP datagram protocol that broadcasts narinfo requests to all private-network broadcast addresses, waits for peer responses (with configurable timeout), then fetches narinfo/NAR data over HTTP from the responding peer. Uses random 4-byte request IDs (anti-spoofing). Validates response addresses with `is_safe_lan_address()`.
+- **`wan.py`** — `TrackerStore`: WAN peer discovery via tracker. Queries tracker for peers, fetches narinfo from peers via HTTP, rewrites NAR URLs to route through the local WAN endpoint. Validates peer addresses with `is_safe_peer_address()`. Includes `X-Peerix-*` auth headers when identity is configured. Streams NARs with transfer tracking for reputation.
+- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry (announce/heartbeat), peer listing, transfer initiation, and transfer reporting for reputation. Supports per-peer cryptographic auth: stores `public_key` with peer records, verifies signatures, rejects impersonation (different key for same `peer_id`). Validates peer addresses with `is_safe_peer_address()`. Backward compatible: auth optional if no keys configured.
+- **`tracker_client.py`** — Client for the tracker. Handles heartbeat announcements, peer listing, transfer init/reporting. Supports `announce_addr` for NAT scenarios. When `PeerIdentity` is provided, signs all requests with `public_key`, `timestamp`, and `signature`.
 - **`prefix.py`** — `PrefixStore`: decorator that namespaces URL paths so local, remote, and WAN NAR routes don't collide.
 - **`filtered.py`** — `FilteredStore`: heuristic filtering of system-specific/sensitive derivations for WAN sharing safety.
-- **`verified.py`** — `VerifiedStore`: verifies store path hashes against upstream cache before WAN sharing.
-- **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to `127.0.0.1` (nix daemon only). Includes ed25519 narinfo signing via `pynacl` when `NIX_SECRET_KEY_FILE` is set. Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v3/wan/` for WAN.
-- **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--announce-addr`, `--peer-id`, `--no-verify`, `--no-filter`, etc.
+- **`verified.py`** — `VerifiedStore`: verifies store path hashes against upstream cache before WAN sharing. Caches expected `narHash` per URL and verifies NAR content on-the-fly during streaming (TOCTOU protection) using SHA256 + Nix base32 encoding.
+- **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to localhost (IPv4 and IPv6). `/local/*` endpoints enforce peer auth when SSH keys are configured (X-Peerix-* headers). Includes ed25519 narinfo signing via `pynacl` when `NIX_SECRET_KEY_FILE` is set. Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v3/wan/` for WAN.
+- **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--announce-addr`, `--peer-id`, `--ssh-public-key`, `--ssh-private-key`, `--no-verify`, `--no-filter`, etc.
 
 ### Network protocol
 
@@ -67,6 +77,14 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 
 - **`module.nix`** — NixOS module (`services.peerix.*` options). Configures a hardened systemd service, adds `http://127.0.0.1:{port}/` as a nix substituter, manages trusted public keys, firewall rules, and all WAN/tracker options. Also includes `services.peerix.tracker.*` for running a tracker.
 - **`flake.nix`** — Exposes `packages.peerix`, `nixosModules.peerix`, overlay, and dev shell.
+
+### Per-peer authentication
+
+Optional SSH ed25519 key-based authentication. When `--ssh-public-key` and `--ssh-private-key` are provided:
+- **Peer ID** is derived from `base64url(SHA256(raw_ed25519_pubkey))` — stable across restarts.
+- **Tracker auth**: `POST /announce` includes `{public_key, timestamp, signature}`. Tracker stores the public key; subsequent announces with a different key for the same `peer_id` are rejected (anti-impersonation). Transfer init/report also require signatures for authenticated peers.
+- **Peer-to-peer auth**: `/local/*` endpoints require `X-Peerix-PeerId`, `X-Peerix-Timestamp`, `X-Peerix-PublicKey`, `X-Peerix-Signature` headers. Localhost always bypasses auth.
+- **Backward compatible**: If no SSH keys configured, auth is disabled. Tracker and peers work as before.
 
 ## Known Issues & Gotchas
 

@@ -28,6 +28,12 @@ parser.add_argument("--peer-id", default=None,
 parser.add_argument("--announce-addr", default=None,
                     help="Address to announce to the tracker (overrides auto-detected IP)")
 
+# SSH key authentication
+parser.add_argument("--ssh-public-key", nargs="?", const="auto", default=None,
+                    help="Path to SSH ed25519 public key for peer identity (omit path for auto-detect)")
+parser.add_argument("--ssh-private-key", default=None,
+                    help="Path to SSH ed25519 private key for request signing")
+
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
                     help="Disable hash verification against upstream cache")
@@ -54,10 +60,39 @@ def run():
     logging.basicConfig(level=args.loglevel)
     uvloop.install()
 
-    asyncio.run(main(args))
+    # Load SSH key identity if configured
+    identity = None
+    if args.ssh_public_key is not None:
+        from peerix.peer_identity import get_peer_id_from_ssh_key, load_signing_identity
+
+        pub_path = None if args.ssh_public_key == "auto" else args.ssh_public_key
+
+        if args.ssh_private_key is not None:
+            # Full signing identity
+            if pub_path is None:
+                # Auto-detect public key from private key path
+                pub_path = args.ssh_private_key + ".pub"
+                if not os.path.exists(pub_path):
+                    parser.error(f"Could not find public key at {pub_path}. "
+                                 f"Specify --ssh-public-key explicitly.")
+            identity = load_signing_identity(pub_path, args.ssh_private_key)
+            if args.peer_id is None:
+                args.peer_id = identity.peer_id
+            logging.info(f"SSH signing identity loaded, peer_id={identity.peer_id}")
+        else:
+            # Public key only — derive peer_id but no signing
+            peer_id = get_peer_id_from_ssh_key(pub_path)
+            if peer_id is not None:
+                if args.peer_id is None:
+                    args.peer_id = peer_id
+                logging.info(f"SSH peer_id derived: {peer_id}")
+            else:
+                logging.warning("Could not find or parse SSH ed25519 public key")
+
+    asyncio.run(main(args, identity))
 
 
-async def main(args):
+async def main(args, identity=None):
     config = Config()
     config.bind = [f"0.0.0.0:{args.port}"]
 
@@ -73,6 +108,7 @@ async def main(args):
         no_default_filters=args.no_default_filters,
         peer_id=args.peer_id,
         announce_addr=args.announce_addr,
+        identity=identity,
     ):
         await serve(app, config)
 

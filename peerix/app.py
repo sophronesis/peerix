@@ -1,3 +1,4 @@
+import typing as t
 import logging
 import contextlib
 import uuid
@@ -15,10 +16,15 @@ try:
 except ImportError:
     HAS_NACL = False
 
+from peerix.net_validation import is_localhost
+from peerix.peer_identity import PeerIdentity, verify_request
+
 logger = logging.getLogger("peerix.app")
 
 _signing_key = None
 _signing_key_name = None
+_auth_enabled = False
+_peer_identity: t.Optional[PeerIdentity] = None
 
 
 def _load_signing_key():
@@ -50,6 +56,37 @@ def sign_narinfo(ni):
     sig_str = f"{_signing_key_name}:{base64.b64encode(sig).decode('ascii')}"
     return ni._replace(signatures=list(ni.signatures) + [sig_str])
 
+
+def _check_peer_auth(req: Request) -> t.Optional[Response]:
+    """Check peer authentication on /local/* endpoints.
+
+    Returns a 401 Response if auth fails, or None if auth passes.
+    """
+    if not _auth_enabled:
+        return None
+
+    if req.client and is_localhost(req.client.host):
+        return None
+
+    peer_id = req.headers.get("X-Peerix-PeerId")
+    timestamp = req.headers.get("X-Peerix-Timestamp")
+    public_key_b64 = req.headers.get("X-Peerix-PublicKey")
+    signature = req.headers.get("X-Peerix-Signature")
+
+    if not all([peer_id, timestamp, public_key_b64, signature]):
+        return Response(content="Authentication required", status_code=401)
+
+    try:
+        pub_bytes = base64.b64decode(public_key_b64)
+    except Exception:
+        return Response(content="Invalid public key", status_code=401)
+
+    if not verify_request(pub_bytes, peer_id, timestamp, signature):
+        return Response(content="Authentication failed", status_code=401)
+
+    return None
+
+
 from peerix.local import local
 from peerix.remote import remote
 from peerix.prefix import PrefixStore
@@ -65,10 +102,16 @@ async def setup_stores(local_port: int, timeout: float, mode: str = "lan",
                        upstream_cache: str = "https://cache.nixos.org",
                        no_filter: bool = False, filter_patterns: list = None,
                        no_default_filters: bool = False, peer_id: str = None,
-                       announce_addr: str = None):
-    global l_access, r_access, w_access
+                       announce_addr: str = None,
+                       identity: t.Optional[PeerIdentity] = None):
+    global l_access, r_access, w_access, _auth_enabled, _peer_identity
     w_access = None
     _load_signing_key()
+
+    if identity is not None:
+        _auth_enabled = True
+        _peer_identity = identity
+        logger.info("Peer authentication enabled")
 
     async with local() as l:
         l_access = PrefixStore("local/nar", l)
@@ -82,7 +125,7 @@ async def setup_stores(local_port: int, timeout: float, mode: str = "lan",
                     w_access = await _setup_wan(
                         l, local_port, tracker_url, no_verify, upstream_cache,
                         no_filter, filter_patterns, no_default_filters, peer_id,
-                        announce_addr,
+                        announce_addr, identity,
                     )
                     try:
                         yield
@@ -98,6 +141,7 @@ async def setup_stores(local_port: int, timeout: float, mode: str = "lan",
             w_access = await _setup_wan(
                 l, local_port, tracker_url, no_verify, upstream_cache,
                 no_filter, filter_patterns, no_default_filters, peer_id,
+                announce_addr, identity,
             )
             try:
                 yield
@@ -107,11 +151,15 @@ async def setup_stores(local_port: int, timeout: float, mode: str = "lan",
 
 async def _setup_wan(local_store, local_port, tracker_url, no_verify,
                      upstream_cache, no_filter, filter_patterns,
-                     no_default_filters, peer_id, announce_addr=None):
+                     no_default_filters, peer_id, announce_addr=None,
+                     identity=None):
     if peer_id is None:
-        peer_id = str(uuid.uuid4())
+        if identity is not None:
+            peer_id = identity.peer_id
+        else:
+            peer_id = str(uuid.uuid4())
 
-    # Build the serving chain: local → verified → filtered
+    # Build the serving chain: local -> verified -> filtered
     serving_store = local_store
     verified_store = None
     if not no_verify:
@@ -124,11 +172,13 @@ async def _setup_wan(local_store, local_port, tracker_url, no_verify,
             use_defaults=not no_default_filters,
         )
 
-    tracker_client = TrackerClient(tracker_url, peer_id, local_port, announce_addr)
+    tracker_client = TrackerClient(tracker_url, peer_id, local_port, announce_addr,
+                                   identity=identity)
     await tracker_client.start_heartbeat()
 
     session = aiohttp.ClientSession()
-    tracker_store = TrackerStore(serving_store, tracker_client, session)
+    tracker_store = TrackerStore(serving_store, tracker_client, session,
+                                identity=identity)
     wan_access = PrefixStore("v3/wan", tracker_store)
 
     return {
@@ -164,7 +214,7 @@ async def cache_info(_: Request) -> Response:
 @app.route("/{hash:str}.narinfo")
 async def narinfo(req: Request) -> Response:
 
-    if req.client.host != "127.0.0.1":
+    if not req.client or not is_localhost(req.client.host):
         return Response(content="Permission denied.", status_code=403)
 
     hsh = req.path_params["hash"]
@@ -186,6 +236,10 @@ async def narinfo(req: Request) -> Response:
 
 @app.route("/local/{hash:str}.narinfo")
 async def access_narinfo(req: Request) -> Response:
+    auth_err = _check_peer_auth(req)
+    if auth_err is not None:
+        return auth_err
+
     ni = await l_access.narinfo(req.path_params["hash"])
     if ni is None:
         return Response(content="Not found", status_code=404)
@@ -194,6 +248,10 @@ async def access_narinfo(req: Request) -> Response:
 
 @app.route("/local/nar/{path:str}")
 async def push_nar(req: Request) -> Response:
+    auth_err = _check_peer_auth(req)
+    if auth_err is not None:
+        return auth_err
+
     try:
         return StreamingResponse(
                 await l_access.nar(f"local/nar/{req.path_params['path']}"),

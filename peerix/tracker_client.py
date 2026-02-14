@@ -1,8 +1,11 @@
 import typing as t
 import logging
 import asyncio
+import time
 
 import aiohttp
+
+from peerix.peer_identity import PeerIdentity, sign_request
 
 
 logger = logging.getLogger("peerix.tracker_client")
@@ -11,11 +14,13 @@ logger = logging.getLogger("peerix.tracker_client")
 class TrackerClient:
 
     def __init__(self, tracker_url: str, peer_id: str, local_port: int,
-                 announce_addr: str = None):
+                 announce_addr: str = None,
+                 identity: t.Optional[PeerIdentity] = None):
         self.tracker_url = tracker_url.rstrip("/")
         self.peer_id = peer_id
         self.local_port = local_port
         self.announce_addr = announce_addr
+        self.identity = identity
         self._session: t.Optional[aiohttp.ClientSession] = None
         self._heartbeat_task: t.Optional[asyncio.Task] = None
 
@@ -23,6 +28,15 @@ class TrackerClient:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
+
+    def _add_auth(self, payload: dict) -> dict:
+        """Add authentication fields to a payload if identity is available."""
+        if self.identity is not None and self.identity.signing_key is not None:
+            timestamp = str(time.time())
+            payload["timestamp"] = timestamp
+            payload["public_key"] = self.identity.public_key_b64
+            payload["signature"] = sign_request(self.identity, self.peer_id, timestamp)
+        return payload
 
     async def start_heartbeat(self):
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -43,6 +57,7 @@ class TrackerClient:
         }
         if self.announce_addr is not None:
             payload["addr"] = self.announce_addr
+        payload = self._add_auth(payload)
         async with session.post(f"{self.tracker_url}/announce", json=payload) as resp:
             if resp.status != 200:
                 logger.warning(f"Announce failed: {resp.status}")
@@ -58,10 +73,12 @@ class TrackerClient:
 
     async def init_transfer(self, sender_id: str) -> t.Optional[int]:
         session = await self._get_session()
-        async with session.post(f"{self.tracker_url}/transfer/init", json={
+        payload = {
             "sender_id": sender_id,
             "receiver_id": self.peer_id,
-        }) as resp:
+        }
+        payload = self._add_auth(payload)
+        async with session.post(f"{self.tracker_url}/transfer/init", json=payload) as resp:
             if resp.status != 200:
                 return None
             data = await resp.json()
@@ -69,13 +86,15 @@ class TrackerClient:
 
     async def report_transfer(self, transfer_id: int, role: str, byte_count: int):
         session = await self._get_session()
+        payload = {
+            "transfer_id": transfer_id,
+            "peer_id": self.peer_id,
+            "role": role,
+            "bytes": byte_count,
+        }
+        payload = self._add_auth(payload)
         try:
-            async with session.post(f"{self.tracker_url}/report", json={
-                "transfer_id": transfer_id,
-                "peer_id": self.peer_id,
-                "role": role,
-                "bytes": byte_count,
-            }) as resp:
+            async with session.post(f"{self.tracker_url}/report", json=payload) as resp:
                 if resp.status != 200:
                     logger.warning(f"Report failed for transfer {transfer_id}: {resp.status}")
         except Exception as e:

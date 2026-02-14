@@ -73,7 +73,9 @@ class LocalStore(Store):
         if sp.endswith(".nar"):
             sp = sp[:-4]
         path = base64.b64decode(sp.replace("_", "/")).decode("utf-8")
-        if not path.startswith((await self.cache_info()).storeDir):
+        path = os.path.realpath(path)
+        store_dir = (await self.cache_info()).storeDir
+        if not path.startswith(store_dir + "/"):
             raise FileNotFoundError()
 
         if not os.path.exists(path):

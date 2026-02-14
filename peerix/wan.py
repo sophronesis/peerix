@@ -1,11 +1,14 @@
 import typing as t
 import logging
 import asyncio
+import time
 
 import aiohttp
 
 from peerix.store import NarInfo, CacheInfo, Store
 from peerix.tracker_client import TrackerClient
+from peerix.net_validation import is_safe_peer_address
+from peerix.peer_identity import PeerIdentity, sign_request
 
 
 logger = logging.getLogger("peerix.wan")
@@ -14,10 +17,24 @@ logger = logging.getLogger("peerix.wan")
 class TrackerStore(Store):
 
     def __init__(self, store: Store, tracker_client: TrackerClient,
-                 session: aiohttp.ClientSession):
+                 session: aiohttp.ClientSession,
+                 identity: t.Optional[PeerIdentity] = None):
         self.store = store
         self.tracker_client = tracker_client
         self.session = session
+        self.identity = identity
+
+    def _auth_headers(self) -> dict:
+        """Build auth headers for peer-to-peer requests."""
+        if self.identity is None or self.identity.signing_key is None:
+            return {}
+        timestamp = str(time.time())
+        return {
+            "X-Peerix-PeerId": self.identity.peer_id,
+            "X-Peerix-Timestamp": timestamp,
+            "X-Peerix-PublicKey": self.identity.public_key_b64,
+            "X-Peerix-Signature": sign_request(self.identity, self.identity.peer_id, timestamp),
+        }
 
     async def cache_info(self) -> CacheInfo:
         return await self.store.cache_info()
@@ -28,14 +45,22 @@ class TrackerStore(Store):
             logger.debug(f"No WAN peers available for {hsh}")
             return None
 
+        headers = self._auth_headers()
+
         for peer in peers:
             addr = peer["addr"]
             port = peer["port"]
             peer_id = peer["peer_id"]
+
+            if not is_safe_peer_address(addr):
+                logger.warning(f"Skipping WAN peer with unsafe address: {addr}")
+                continue
+
             try:
                 async with self.session.get(
                     f"http://{addr}:{port}/local/{hsh}.narinfo",
                     timeout=aiohttp.ClientTimeout(total=10),
+                    headers=headers,
                 ) as resp:
                     if resp.status != 200:
                         continue
@@ -60,15 +85,22 @@ class TrackerStore(Store):
 
         _, addr, port_str, peer_id, hsh, nar_url = parts
         port = int(port_str)
+
+        if not is_safe_peer_address(addr):
+            raise FileNotFoundError(f"Unsafe peer address: {addr}")
+
         logger.debug(f"WAN nar fetch: http://{addr}:{port}/{nar_url}")
 
         # Init transfer for reputation tracking
         transfer_id = await self.tracker_client.init_transfer(peer_id)
 
+        headers = self._auth_headers()
+
         try:
             resp = await self.session.get(
                 f"http://{addr}:{port}/{nar_url}",
                 timeout=aiohttp.ClientTimeout(total=300),
+                headers=headers,
             )
             if resp.status != 200:
                 raise FileNotFoundError(f"NAR fetch failed from {addr}:{port}/{nar_url}: {resp.status}")

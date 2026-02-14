@@ -156,6 +156,24 @@ in
         '';
       };
 
+      sshPublicKeyFile = lib.mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Path to SSH ed25519 public key for peer identity.
+          Defaults to /etc/ssh/ssh_host_ed25519_key.pub if sshPrivateKeyFile is set.
+        '';
+      };
+
+      sshPrivateKeyFile = lib.mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Path to SSH ed25519 private key for request signing.
+          When set, enables per-peer cryptographic authentication.
+        '';
+      };
+
       tracker = {
         enable = lib.mkEnableOption "peerix tracker";
 
@@ -231,6 +249,14 @@ in
             (lib.mkIf (cfg.privateKeyFile != null) [
               cfg.privateKeyFile
             ])
+
+            (lib.mkIf (cfg.sshPublicKeyFile != null) [
+              cfg.sshPublicKeyFile
+            ])
+
+            (lib.mkIf (cfg.sshPrivateKeyFile != null) [
+              cfg.sshPrivateKeyFile
+            ])
           ];
           ExecPaths = [
             "/nix/store"
@@ -240,18 +266,23 @@ in
           ];
         };
         script = let
-          modeArgs = "--mode ${cfg.mode}";
-          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
+          esc = lib.escapeShellArg;
+          modeArgs = "--mode ${esc cfg.mode}";
+          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${esc cfg.trackerUrl}";
           verifyArgs = lib.optionalString cfg.noVerify "--no-verify";
           upstreamArgs = lib.optionalString (cfg.upstreamCache != "https://cache.nixos.org")
-            "--upstream-cache ${cfg.upstreamCache}";
+            "--upstream-cache ${esc cfg.upstreamCache}";
           filterArgs = lib.optionalString cfg.noFilter "--no-filter";
           defaultFilterArgs = lib.optionalString cfg.noDefaultFilters "--no-default-filters";
           patternArgs = lib.optionalString (cfg.filterPatterns != [])
-            "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
+            "--filter-patterns ${lib.concatMapStringsSep " " esc cfg.filterPatterns}";
           portArgs = "--port ${toString cfg.port}";
-          announceAddrArgs = lib.optionalString (cfg.announceAddr != null) "--announce-addr ${cfg.announceAddr}";
-          peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
+          announceAddrArgs = lib.optionalString (cfg.announceAddr != null) "--announce-addr ${esc cfg.announceAddr}";
+          peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${esc cfg.peerId}";
+          sshPubKeyArgs = lib.optionalString (cfg.sshPublicKeyFile != null)
+            "--ssh-public-key ${esc (toString cfg.sshPublicKeyFile)}";
+          sshPrivKeyArgs = lib.optionalString (cfg.sshPrivateKeyFile != null)
+            "--ssh-private-key ${esc (toString cfg.sshPrivateKeyFile)}";
         in ''
           exec ${cfg.package}/bin/peerix \
             ${portArgs} \
@@ -263,7 +294,9 @@ in
             ${defaultFilterArgs} \
             ${patternArgs} \
             ${announceAddrArgs} \
-            ${peerIdArgs}
+            ${peerIdArgs} \
+            ${sshPubKeyArgs} \
+            ${sshPrivKeyArgs}
         '';
       };
 
@@ -315,10 +348,12 @@ in
           ReadWritePaths = [ (builtins.dirOf tcfg.dbPath) ];
           ExecPaths = [ "/nix/store" ];
         };
-        script = ''
+        script = let
+          esc = lib.escapeShellArg;
+        in ''
           exec ${cfg.package}/bin/peerix-tracker \
             --port ${toString tcfg.port} \
-            --db-path ${tcfg.dbPath}
+            --db-path ${esc tcfg.dbPath}
         '';
       };
 

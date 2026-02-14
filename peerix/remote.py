@@ -5,12 +5,14 @@ import logging
 import asyncio
 import ipaddress
 import contextlib
+import os
 
 import psutil
 import aiohttp
 
 
 from peerix.store import NarInfo, Store
+from peerix.net_validation import is_safe_lan_address
 
 
 logger = logging.getLogger("peerix.remote")
@@ -40,7 +42,6 @@ def get_myself():
 
 
 class DiscoveryProtocol(asyncio.DatagramProtocol, Store):
-    idx: int
     transport: asyncio.DatagramTransport
     waiters: t.Dict[int, asyncio.Future]
     store: Store
@@ -50,7 +51,6 @@ class DiscoveryProtocol(asyncio.DatagramProtocol, Store):
     timeout: float
 
     def __init__(self, store: Store, session: aiohttp.ClientSession, local_port: int, prefix: str, timeout: float):
-        self.idx = 0
         self.waiters = {}
         self.store = store
         self.session = session
@@ -105,7 +105,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol, Store):
 
     async def narinfo(self, hsh: str) -> t.Optional[NarInfo]:
         fut = asyncio.get_running_loop().create_future()
-        self.idx = (idx := self.idx)+1
+        idx = int.from_bytes(os.urandom(4), "big")
         self.waiters[idx] = fut
         fut.add_done_callback(lambda _: self.waiters.pop(idx, None))
         logging.info(f"Requesting {hsh} from direct local network.")
@@ -122,6 +122,10 @@ class DiscoveryProtocol(asyncio.DatagramProtocol, Store):
             return None
 
         logging.info(f"{addr[0]}:{addr[1]} responded for {hsh} with http://{addr[0]}:{port}/{url}")
+
+        if not is_safe_lan_address(addr[0]):
+            logging.warning(f"Rejected unsafe LAN address from UDP response: {addr[0]}")
+            return None
 
         async with self.session.get(f"http://{addr[0]}:{port}/{url}") as resp:
             if resp.status != 200:
@@ -148,6 +152,9 @@ class DiscoveryProtocol(asyncio.DatagramProtocol, Store):
 
     async def _nar_req(self, url: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
         addr1, addr2, _, p = url.split("/", 3)
+        if not is_safe_lan_address(addr1):
+            logging.warning(f"Rejected unsafe LAN address in NAR request: {addr1}")
+            raise FileNotFoundError(f"Unsafe address: {addr1}")
         resp = await self.session.get(f"http://{addr1}:{addr2}/{p}")
         if resp.status == 200:
             return self._nar_direct(resp)
