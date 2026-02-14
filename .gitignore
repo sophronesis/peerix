@@ -145,3 +145,19 @@ cython_debug/
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 result
+
+# Nix
+result-*
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Test VM artifacts
+test-vm/*.qcow2
+test-vm/*.pem
+test-vm/opencv-custom.nix
+
+# Secrets
+*.pem
