@@ -40,6 +40,8 @@ class NarInfo(t.NamedTuple):
         signatures = []
 
         for line in data.splitlines():
+            if ":" not in line:
+                continue
             k, v = line.split(":", 1)
             v = v.strip()
             k = k.strip()

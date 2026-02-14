@@ -83,7 +83,7 @@ def create_tracker_app(db_path: str) -> Starlette:
         if not peer_id or port is None:
             return JSONResponse({"error": "peer_id and port required"}, status_code=400)
 
-        addr = req.client.host
+        addr = body.get("addr") or req.client.host
         now = time.time()
 
         conn.execute(

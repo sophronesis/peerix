@@ -10,10 +10,12 @@ logger = logging.getLogger("peerix.tracker_client")
 
 class TrackerClient:
 
-    def __init__(self, tracker_url: str, peer_id: str, local_port: int):
+    def __init__(self, tracker_url: str, peer_id: str, local_port: int,
+                 announce_addr: str = None):
         self.tracker_url = tracker_url.rstrip("/")
         self.peer_id = peer_id
         self.local_port = local_port
+        self.announce_addr = announce_addr
         self._session: t.Optional[aiohttp.ClientSession] = None
         self._heartbeat_task: t.Optional[asyncio.Task] = None
 
@@ -35,10 +37,13 @@ class TrackerClient:
 
     async def announce(self):
         session = await self._get_session()
-        async with session.post(f"{self.tracker_url}/announce", json={
+        payload = {
             "peer_id": self.peer_id,
             "port": self.local_port,
-        }) as resp:
+        }
+        if self.announce_addr is not None:
+            payload["addr"] = self.announce_addr
+        async with session.post(f"{self.tracker_url}/announce", json=payload) as resp:
             if resp.status != 200:
                 logger.warning(f"Announce failed: {resp.status}")
 
@@ -51,11 +56,11 @@ class TrackerClient:
             # Filter out ourselves
             return [p for p in data.get("peers", []) if p["peer_id"] != self.peer_id]
 
-    async def init_transfer(self, receiver_id: str) -> t.Optional[int]:
+    async def init_transfer(self, sender_id: str) -> t.Optional[int]:
         session = await self._get_session()
         async with session.post(f"{self.tracker_url}/transfer/init", json={
-            "sender_id": self.peer_id,
-            "receiver_id": receiver_id,
+            "sender_id": sender_id,
+            "receiver_id": self.peer_id,
         }) as resp:
             if resp.status != 200:
                 return None

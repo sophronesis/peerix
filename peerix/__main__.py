@@ -25,6 +25,8 @@ parser.add_argument("--tracker-url", default=None,
                     help="URL of the peerix tracker (required for wan/both modes)")
 parser.add_argument("--peer-id", default=None,
                     help="Unique peer ID (auto-generated if not set)")
+parser.add_argument("--announce-addr", default=None,
+                    help="Address to announce to the tracker (overrides auto-detected IP)")
 
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
@@ -70,6 +72,7 @@ async def main(args):
         filter_patterns=args.filter_patterns,
         no_default_filters=args.no_default_filters,
         peer_id=args.peer_id,
+        announce_addr=args.announce_addr,
     ):
         await serve(app, config)
 

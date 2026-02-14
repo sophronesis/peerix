@@ -53,23 +53,25 @@ class TrackerStore(Store):
 
     async def nar(self, url: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
         # URL format: wan/{addr}/{port}/{peer_id}/{hash}/{nar_url}
+        logger.debug(f"WAN nar() called with url: {url}")
         parts = url.split("/", 5)
         if len(parts) < 6 or parts[0] != "wan":
             raise FileNotFoundError(f"Invalid WAN NAR URL: {url}")
 
         _, addr, port_str, peer_id, hsh, nar_url = parts
         port = int(port_str)
+        logger.debug(f"WAN nar fetch: http://{addr}:{port}/{nar_url}")
 
         # Init transfer for reputation tracking
         transfer_id = await self.tracker_client.init_transfer(peer_id)
 
         try:
             resp = await self.session.get(
-                f"http://{addr}:{port}/local/nar/{nar_url}",
+                f"http://{addr}:{port}/{nar_url}",
                 timeout=aiohttp.ClientTimeout(total=300),
             )
             if resp.status != 200:
-                raise FileNotFoundError(f"NAR fetch failed from {addr}:{port}: {resp.status}")
+                raise FileNotFoundError(f"NAR fetch failed from {addr}:{port}/{nar_url}: {resp.status}")
 
             return self._stream_nar(resp, transfer_id, peer_id)
 

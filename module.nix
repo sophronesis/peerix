@@ -70,6 +70,12 @@ in
         '';
       };
 
+      port = lib.mkOption {
+        type = types.int;
+        default = 12304;
+        description = "Port for the peerix HTTP server and peer announcements.";
+      };
+
       package = mkOption {
         type = types.package;
         default = pkgs.peerix;
@@ -130,6 +136,15 @@ in
         default = false;
         description = ''
           Disable hash verification against upstream cache.
+        '';
+      };
+
+      announceAddr = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Address to announce to the tracker. Overrides the auto-detected IP.
+          Useful for NAT/port-forwarding setups (e.g. QEMU user-net).
         '';
       };
 
@@ -234,9 +249,12 @@ in
           defaultFilterArgs = lib.optionalString cfg.noDefaultFilters "--no-default-filters";
           patternArgs = lib.optionalString (cfg.filterPatterns != [])
             "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
+          portArgs = "--port ${toString cfg.port}";
+          announceAddrArgs = lib.optionalString (cfg.announceAddr != null) "--announce-addr ${cfg.announceAddr}";
           peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
         in ''
           exec ${cfg.package}/bin/peerix \
+            ${portArgs} \
             ${modeArgs} \
             ${trackerArgs} \
             ${verifyArgs} \
@@ -244,6 +262,7 @@ in
             ${filterArgs} \
             ${defaultFilterArgs} \
             ${patternArgs} \
+            ${announceAddrArgs} \
             ${peerIdArgs}
         '';
       };
@@ -251,7 +270,7 @@ in
       nix = {
         settings = {
           substituters = [
-            "http://127.0.0.1:12304/"
+            "http://127.0.0.1:${toString cfg.port}/"
           ];
           trusted-public-keys = [
             (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
@@ -265,8 +284,8 @@ in
       };
 
       networking.firewall = lib.mkIf (cfg.openFirewall) {
-        allowedTCPPorts = [ 12304 ];
-        allowedUDPPorts = [ 12304 ];
+        allowedTCPPorts = [ cfg.port ];
+        allowedUDPPorts = [ cfg.port ];
       };
     })
 

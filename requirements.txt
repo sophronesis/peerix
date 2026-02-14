@@ -3,3 +3,4 @@ uvloop
 hypercorn
 starlette
 psutil
+pynacl

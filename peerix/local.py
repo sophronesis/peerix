@@ -55,6 +55,8 @@ class LocalStore(Store):
                     elif k == "Priority":
                         priority = int(v)
 
+                if not storeDir.startswith("/"):
+                    storeDir = "/nix/store"
                 self._cache = CacheInfo(storeDir, wantMassQuery, priority)
 
         return self._cache
@@ -81,8 +83,9 @@ class LocalStore(Store):
 
     async def _nar_pull(self, path: str) -> t.AsyncIterable[bytes]:
         logger.info(f"Serving {path}")
+        nix_store = shutil.which("nix-store")
         process = await asyncio.create_subprocess_exec(
-                nix, "dump-path", "--", path,
+                nix_store, "--dump", path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
@@ -105,11 +108,14 @@ async def local():
         sock = f"{tmpdir}/server.sock"
 
         logger.info("Launching nix-serve.")
+        # Don't pass NIX_SECRET_KEY_FILE to nix-serve — signing is handled by peerix
+        nix_serve_env = {k: v for k, v in os.environ.items() if k != "NIX_SECRET_KEY_FILE"}
         process = await asyncio.create_subprocess_exec(
             nix_serve, "--listen", sock,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=sys.stderr
+            stderr=sys.stderr,
+            env=nix_serve_env,
         )
         for _ in range(10):
             if os.path.exists(sock):
