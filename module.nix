@@ -217,15 +217,15 @@ in
           PrivateUsers = true;
 
           SystemCallFilter = [
-            "@aio"
-            "@basic-io"
-            "@file-system"
-            "@io-event"
-            "@process"
-            "@network-io"
-            "@timer"
-            "@signal"
-            "@alarm"
+            "~@clock"
+            "~@debug"
+            "~@module"
+            "~@mount"
+            "~@raw-io"
+            "~@reboot"
+            "~@swap"
+            "~@obsolete"
+            "~@cpu-emulation"
           ];
           SystemCallErrorNumber = "EPERM";
 
