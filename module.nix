@@ -72,16 +72,26 @@ in
 
       package = mkOption {
         type = types.package;
-        default = pkgs.peerix;
-        defaultText = literalExpression "pkgs.peerix";
-        description = "The package to use for peerix";
+        default = if cfg.mode == "libp2p" || cfg.mode == "hybrid"
+                  then pkgs.peerix-full
+                  else pkgs.peerix;
+        defaultText = literalExpression "pkgs.peerix or pkgs.peerix-full";
+        description = ''
+          The package to use for peerix.
+          Defaults to peerix-full for libp2p/hybrid modes, peerix for others.
+        '';
       };
 
       mode = lib.mkOption {
-        type = types.enum [ "lan" "wan" "both" ];
+        type = types.enum [ "lan" "wan" "both" "libp2p" "hybrid" ];
         default = "lan";
         description = ''
-          Discovery mode: lan (UDP broadcast), wan (tracker-based), or both.
+          Discovery mode:
+          - lan: UDP broadcast for local network discovery
+          - wan: HTTP tracker-based discovery
+          - both: lan + wan combined
+          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching)
+          - hybrid: libp2p + tracker for maximum compatibility
         '';
       };
 
@@ -89,7 +99,7 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          URL of the peerix tracker server. Required for wan and both modes.
+          URL of the peerix tracker server. Required for wan, both, and hybrid modes.
         '';
       };
 
@@ -138,6 +148,56 @@ in
         default = null;
         description = ''
           Unique peer ID. Auto-generated if null.
+        '';
+      };
+
+      # LibP2P options
+      bootstrapPeers = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmPeerID" ];
+        description = ''
+          LibP2P bootstrap peer multiaddrs for DHT initialization.
+          Required for libp2p mode to discover peers outside local network.
+        '';
+      };
+
+      relayServers = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmRelayID" ];
+        description = ''
+          LibP2P relay server multiaddrs for NAT traversal fallback.
+          Used when direct connections fail due to NAT.
+        '';
+      };
+
+      networkId = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "my-private-network";
+        description = ''
+          Network identifier for DHT peer discovery.
+          Peers with the same network ID will discover each other.
+          If null, uses default public network or derives from tracker URL.
+        '';
+      };
+
+      listenAddrs = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/0.0.0.0/tcp/12304" "/ip4/0.0.0.0/udp/12304/quic-v1" ];
+        description = ''
+          LibP2P listen multiaddrs. If empty, defaults to TCP and QUIC on the peerix port.
+        '';
+      };
+
+      enableIpfsCompat = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable IPFS compatibility layer.
+          Announces NARs to IPFS DHT for discoverability by IPFS clients.
         '';
       };
 
@@ -235,6 +295,16 @@ in
           patternArgs = lib.optionalString (cfg.filterPatterns != [])
             "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
           peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
+          # LibP2P args
+          bootstrapArgs = lib.optionalString (cfg.bootstrapPeers != [])
+            "--bootstrap-peers ${lib.concatStringsSep " " cfg.bootstrapPeers}";
+          relayArgs = lib.optionalString (cfg.relayServers != [])
+            "--relay-servers ${lib.concatStringsSep " " cfg.relayServers}";
+          networkIdArgs = lib.optionalString (cfg.networkId != null)
+            "--network-id ${cfg.networkId}";
+          listenAddrsArgs = lib.optionalString (cfg.listenAddrs != [])
+            "--listen-addrs ${lib.concatStringsSep " " cfg.listenAddrs}";
+          ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
         in ''
           exec ${cfg.package}/bin/peerix \
             ${modeArgs} \
@@ -244,7 +314,12 @@ in
             ${filterArgs} \
             ${defaultFilterArgs} \
             ${patternArgs} \
-            ${peerIdArgs}
+            ${peerIdArgs} \
+            ${bootstrapArgs} \
+            ${relayArgs} \
+            ${networkIdArgs} \
+            ${listenAddrsArgs} \
+            ${ipfsCompatArgs}
         '';
       };
 

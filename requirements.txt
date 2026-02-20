@@ -3,3 +3,5 @@ uvloop
 hypercorn
 starlette
 psutil
+libp2p>=0.17.0
+multiaddr>=0.0.9
