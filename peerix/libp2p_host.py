@@ -56,8 +56,9 @@ except ImportError as e:
 class LibP2PConfig:
     """Configuration for LibP2P host."""
     # Note: py-libp2p 0.6.0 only supports TCP, not QUIC-v1
+    # Default port is 13304 (HTTP port 12304 + 1000) to avoid conflict
     listen_addrs: t.List[str] = field(default_factory=lambda: [
-        "/ip4/0.0.0.0/tcp/12304",
+        "/ip4/0.0.0.0/tcp/13304",
     ])
     bootstrap_peers: t.List[str] = field(default_factory=list)
     relay_servers: t.List[str] = field(default_factory=list)

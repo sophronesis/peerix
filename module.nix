@@ -341,7 +341,8 @@ in
       };
 
       networking.firewall = lib.mkIf (cfg.openFirewall) {
-        allowedTCPPorts = [ 12304 ];
+        # HTTP on 12304, libp2p on 13304 (port + 1000)
+        allowedTCPPorts = [ 12304 13304 ];
         allowedUDPPorts = [ 12304 ];
       };
     })

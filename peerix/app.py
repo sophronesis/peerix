@@ -212,9 +212,11 @@ async def _setup_libp2p(
 
     # Configure libp2p host
     # Note: py-libp2p 0.6.0 only supports TCP, not QUIC
+    # Use a different port for libp2p to avoid conflict with HTTP server
+    libp2p_port = local_port + 1000  # e.g., 12304 -> 13304
     config = LibP2PConfig(
         listen_addrs=listen_addrs or [
-            f"/ip4/0.0.0.0/tcp/{local_port}",
+            f"/ip4/0.0.0.0/tcp/{libp2p_port}",
         ],
         bootstrap_peers=bootstrap_peers,
         relay_servers=relay_servers,
