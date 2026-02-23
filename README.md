@@ -105,9 +105,9 @@ Configuration Options
 
 | Option                               | Description                                                                              | Default   |
 |---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.bootstrapPeers`      | LibP2P bootstrap peer multiaddrs for DHT initialization.                                 | `[]`      |
+| `services.peerix.bootstrapPeers`      | LibP2P bootstrap peer multiaddrs for DHT initialization.                                 | `[DO server]` |
 | `services.peerix.relayServers`        | LibP2P relay server multiaddrs for NAT traversal fallback.                               | `[]`      |
-| `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `null`    |
+| `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `"default"` |
 | `services.peerix.listenAddrs`         | LibP2P listen addresses. Note: py-libp2p 0.6.0 only supports TCP.                        | `["/ip4/0.0.0.0/tcp/{port+1000}"]` |
 
 WAN Mode
@@ -160,35 +160,33 @@ LibP2P mode enables true peer-to-peer networking with built-in NAT traversal usi
 
 ### Setup
 
-1. Configure a bootstrap node on a publicly accessible host:
+LibP2P mode works out of the box with default settings - peers connect via a public bootstrap server:
 
 ```nix
 services.peerix = {
   enable = true;
   mode = "libp2p";
-  networkId = "my-network";  # Must match across all peers
 };
 ```
 
-2. Get the bootstrap peer's multiaddr from the logs:
-
-```bash
-journalctl -u peerix -f | grep "LibP2P listening"
-# Output: LibP2P listening on: ['/ip4/1.2.3.4/tcp/13304']
-# Peer ID is also shown: peer_id=16Uiu2HAm...
-```
-
-3. Configure other peers to bootstrap from this node:
+For private networks, set a custom `networkId` (all peers must match):
 
 ```nix
 services.peerix = {
   enable = true;
   mode = "libp2p";
-  networkId = "my-network";
+  networkId = "my-private-network";
   bootstrapPeers = [
-    "/ip4/1.2.3.4/tcp/13304/p2p/16Uiu2HAmXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    "/ip4/your-server/tcp/13304/p2p/QmYourPeerID"
   ];
 };
+```
+
+To find your peer's multiaddr, check the logs:
+
+```bash
+journalctl -u peerix | grep "LibP2P listening"
+# Output: LibP2P listening on: ['/ip4/1.2.3.4/tcp/13304/p2p/16Uiu2HAm...']
 ```
 
 ### NAT Traversal
