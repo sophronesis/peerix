@@ -130,7 +130,7 @@
         };
       };
 
-      defaultPackage = self.packages.${system}.peerix;
+      defaultPackage = self.packages.${system}.peerix-full;
 
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
@@ -154,6 +154,6 @@
         '';
       };
 
-      defaultApp = { type = "app"; program = "${self.packages.${system}.peerix}/bin/peerix"; };
+      defaultApp = { type = "app"; program = "${self.packages.${system}.peerix-full}/bin/peerix"; };
     });
 }

@@ -72,13 +72,12 @@ in
 
       package = mkOption {
         type = types.package;
-        default = if cfg.mode == "libp2p" || cfg.mode == "hybrid"
-                  then pkgs.peerix-full
-                  else pkgs.peerix;
-        defaultText = literalExpression "pkgs.peerix or pkgs.peerix-full";
+        default = pkgs.peerix-full;
+        defaultText = literalExpression "pkgs.peerix-full";
         description = ''
           The package to use for peerix.
-          Defaults to peerix-full for libp2p/hybrid modes, peerix for others.
+          Defaults to peerix-full which supports all modes including libp2p.
+          Use pkgs.peerix for a smaller package without libp2p support.
         '';
       };
 

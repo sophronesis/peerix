@@ -77,7 +77,7 @@ Configuration Options
 | `services.peerix.publicKeyFile`  | Path to the public key file for verifying signatures.                                        | `null`    |
 | `services.peerix.publicKey`      | Public key string for verifying signatures.                                                  | `null`    |
 | `services.peerix.globalCacheTTL` | How long (seconds) nix should cache narinfo entries.                                         | `null`    |
-| `services.peerix.package`        | The peerix package to use.                                                                   | `pkgs.peerix` |
+| `services.peerix.package`        | The peerix package to use. Use `pkgs.peerix` for a smaller version without libp2p.           | `pkgs.peerix-full` |
 
 ### WAN Options
 
