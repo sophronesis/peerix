@@ -92,23 +92,27 @@ Configuration Options
 | `services.peerix.noDefaultFilters`    | Keep filtering but skip built-in default patterns.                                       | `false`   |
 | `services.peerix.filterPatterns`      | Additional fnmatch patterns to exclude from WAN sharing.                                 | `[]`      |
 
-### Tracker Service
-
-| Option                               | Description                                                                              | Default   |
-|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.tracker.enable`      | Enable the peerix tracker server.                                                        | `false`   |
-| `services.peerix.tracker.port`        | Port for the tracker server.                                                             | `12305`   |
-| `services.peerix.tracker.dbPath`      | Path to the tracker SQLite database.                                                     | `"/var/lib/peerix-tracker/tracker.db"` |
-| `services.peerix.tracker.openFirewall`| Open the firewall for the tracker port.                                                  | `true`    |
-
 ### LibP2P Options
 
 | Option                               | Description                                                                              | Default   |
 |---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.bootstrapPeers`      | LibP2P bootstrap peer multiaddrs for DHT initialization.                                 | `[DO server]` |
+| `services.peerix.bootstrapUrl`        | URL to fetch bootstrap peer dynamically. Used when bootstrapPeers is empty.              | `"https://sophronesis.dev/peerix/bootstrap"` |
+| `services.peerix.bootstrapPeers`      | Static LibP2P bootstrap peer multiaddrs. If empty, fetched from bootstrapUrl.            | `[]`      |
 | `services.peerix.relayServers`        | LibP2P relay server multiaddrs for NAT traversal fallback.                               | `[]`      |
 | `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `"default"` |
 | `services.peerix.listenAddrs`         | LibP2P listen addresses. Note: py-libp2p 0.6.0 only supports TCP.                        | `["/ip4/0.0.0.0/tcp/{port+1000}"]` |
+
+### Tracker Service
+
+Run your own tracker for private networks or as a public bootstrap node:
+
+| Option                               | Description                                                                              | Default   |
+|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
+| `services.peerix-tracker.enable`      | Enable the peerix tracker server.                                                        | `false`   |
+| `services.peerix-tracker.port`        | Port for the tracker HTTP server.                                                        | `12305`   |
+| `services.peerix-tracker.dbPath`      | Path to the tracker SQLite database.                                                     | `"/var/lib/peerix-tracker/tracker.db"` |
+| `services.peerix-tracker.openFirewall`| Open the firewall for the tracker port.                                                  | `true`    |
+| `services.peerix-tracker.package`     | The peerix package to use.                                                               | `pkgs.peerix-full` |
 
 WAN Mode
 --------
@@ -225,6 +229,17 @@ services.peerix = {
 ```
 
 This allows peers using libp2p to connect with peers using the HTTP tracker.
+
+### Bootstrap API
+
+Peerix exposes a `/bootstrap` endpoint that returns the current peer's multiaddr:
+
+```bash
+curl https://your-bootstrap-server:12304/bootstrap
+# Returns: {"peer_id": "16Uiu2HAm...", "multiaddrs": ["/ip4/.../p2p/..."], "network_id": "default"}
+```
+
+This enables dynamic bootstrap peer discovery - clients fetch the current peer ID at startup instead of using hardcoded values that break when the server restarts.
 
 Network Protocol
 ----------------

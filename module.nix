@@ -1,7 +1,7 @@
 { lib, config, pkgs, ... }:
 let
   cfg = config.services.peerix;
-  tcfg = cfg.tracker;
+  tcfg = config.services.peerix-tracker;
 in
 {
   options = with lib; {
@@ -151,23 +151,31 @@ in
       };
 
       # LibP2P options
+      bootstrapUrl = lib.mkOption {
+        type = types.nullOr types.str;
+        default = "https://sophronesis.dev/peerix/bootstrap";
+        example = "https://my-server.com/peerix/bootstrap";
+        description = ''
+          URL to fetch bootstrap peer multiaddr dynamically.
+          The endpoint should return JSON with "multiaddrs" array.
+          Used when bootstrapPeers is empty. Set to null to disable.
+        '';
+      };
+
       bootstrapPeers = lib.mkOption {
         type = types.listOf types.str;
-        default = [
-          # Default public bootstrap node (DigitalOcean)
-          "/ip4/164.92.164.113/tcp/13304/p2p/16Uiu2HAmEHu93ctBWUpaKUtf4PenvLB3ynuhyfvXTtqhVABqW8Qw"
-        ];
+        default = [];
         example = [ "/ip4/1.2.3.4/tcp/13304/p2p/QmPeerID" ];
         description = ''
-          LibP2P bootstrap peer multiaddrs for DHT initialization.
-          Defaults to public peerix bootstrap node for the "default" network.
+          Static LibP2P bootstrap peer multiaddrs for DHT initialization.
+          If empty and bootstrapUrl is set, peers are fetched dynamically.
         '';
       };
 
       relayServers = lib.mkOption {
         type = types.listOf types.str;
         default = [];
-        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmRelayID" ];
+        example = [ "/ip4/1.2.3.4/tcp/13304/p2p/QmRelayID" ];
         description = ''
           LibP2P relay server multiaddrs for NAT traversal fallback.
           Used when direct connections fail due to NAT.
@@ -187,9 +195,9 @@ in
       listenAddrs = lib.mkOption {
         type = types.listOf types.str;
         default = [];
-        example = [ "/ip4/0.0.0.0/tcp/12304" ];
+        example = [ "/ip4/0.0.0.0/tcp/13304" ];
         description = ''
-          LibP2P listen multiaddrs. If empty, defaults to TCP on the peerix port.
+          LibP2P listen multiaddrs. If empty, defaults to TCP on port+1000.
           Note: py-libp2p 0.6.0 only supports TCP, not QUIC.
         '';
       };
@@ -202,27 +210,35 @@ in
           Announces NARs to IPFS DHT for discoverability by IPFS clients.
         '';
       };
+    };
 
-      tracker = {
-        enable = lib.mkEnableOption "peerix tracker";
+    # Tracker service (separate top-level for clarity)
+    services.peerix-tracker = {
+      enable = lib.mkEnableOption "peerix tracker server for P2P peer discovery";
 
-        port = lib.mkOption {
-          type = types.int;
-          default = 12305;
-          description = "Port for the tracker server.";
-        };
+      port = lib.mkOption {
+        type = types.int;
+        default = 12305;
+        description = "Port for the tracker HTTP server.";
+      };
 
-        dbPath = lib.mkOption {
-          type = types.str;
-          default = "/var/lib/peerix-tracker/tracker.db";
-          description = "Path to the tracker SQLite database.";
-        };
+      dbPath = lib.mkOption {
+        type = types.str;
+        default = "/var/lib/peerix-tracker/tracker.db";
+        description = "Path to the tracker SQLite database.";
+      };
 
-        openFirewall = lib.mkOption {
-          type = types.bool;
-          default = true;
-          description = "Whether to open the firewall for the tracker port.";
-        };
+      openFirewall = lib.mkOption {
+        type = types.bool;
+        default = true;
+        description = "Whether to open the firewall for the tracker port.";
+      };
+
+      package = lib.mkOption {
+        type = types.package;
+        default = pkgs.peerix-full;
+        defaultText = lib.literalExpression "pkgs.peerix-full";
+        description = "The peerix package to use for the tracker.";
       };
     };
   };
@@ -298,6 +314,8 @@ in
             "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
           peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
           # LibP2P args
+          bootstrapUrlArgs = lib.optionalString (cfg.bootstrapUrl != null && cfg.bootstrapPeers == [])
+            "--bootstrap-url ${cfg.bootstrapUrl}";
           bootstrapArgs = lib.optionalString (cfg.bootstrapPeers != [])
             "--bootstrap-peers ${lib.concatStringsSep " " cfg.bootstrapPeers}";
           relayArgs = lib.optionalString (cfg.relayServers != [])
@@ -316,6 +334,7 @@ in
             ${defaultFilterArgs} \
             ${patternArgs} \
             ${peerIdArgs} \
+            ${bootstrapUrlArgs} \
             ${bootstrapArgs} \
             ${relayArgs} \
             ${networkIdArgs} \
@@ -374,7 +393,7 @@ in
           ExecPaths = [ "/nix/store" ];
         };
         script = ''
-          exec ${cfg.package}/bin/peerix-tracker \
+          exec ${tcfg.package}/bin/peerix-tracker \
             --port ${toString tcfg.port} \
             --db-path ${tcfg.dbPath}
         '';

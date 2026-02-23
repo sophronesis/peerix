@@ -1,6 +1,9 @@
 import os
 import logging
 import argparse
+import json
+import urllib.request
+import urllib.error
 
 import trio
 from hypercorn import Config
@@ -8,6 +11,8 @@ from hypercorn.trio import serve
 
 from peerix.app import app, setup_stores
 
+
+logger = logging.getLogger("peerix.main")
 
 parser = argparse.ArgumentParser(description="Peerix nix binary cache.")
 parser.add_argument("--verbose", action="store_const", const=logging.DEBUG, default=logging.INFO, dest="loglevel")
@@ -27,14 +32,16 @@ parser.add_argument("--peer-id", default=None,
                     help="Unique peer ID (auto-generated if not set)")
 
 # LibP2P options
+parser.add_argument("--bootstrap-url", default=None,
+                    help="URL to fetch bootstrap peer multiaddr dynamically (e.g., https://sophronesis.dev/peerix/bootstrap)")
 parser.add_argument("--bootstrap-peers", nargs="*", default=None,
-                    help="LibP2P bootstrap peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/12304/p2p/QmPeerID)")
+                    help="LibP2P bootstrap peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/13304/p2p/QmPeerID)")
 parser.add_argument("--relay-servers", nargs="*", default=None,
                     help="LibP2P relay server multiaddrs for NAT traversal fallback")
 parser.add_argument("--network-id", default=None,
                     help="Network identifier for DHT peer discovery (peers with same ID discover each other)")
 parser.add_argument("--listen-addrs", nargs="*", default=None,
-                    help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT)")
+                    help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT+1000)")
 parser.add_argument("--enable-ipfs-compat", action="store_true",
                     help="Enable IPFS compatibility layer (announce NARs to IPFS DHT)")
 
@@ -53,6 +60,27 @@ parser.add_argument("--no-default-filters", action="store_true",
                     help="Keep filtering enabled but skip built-in default patterns")
 
 
+def fetch_bootstrap_peers(url: str) -> list:
+    """Fetch bootstrap peer multiaddrs from a URL."""
+    try:
+        logger.info(f"Fetching bootstrap peers from {url}")
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            multiaddrs = data.get("multiaddrs", [])
+            if multiaddrs:
+                logger.info(f"Got bootstrap peers: {multiaddrs}")
+                return multiaddrs
+            else:
+                logger.warning(f"No multiaddrs in bootstrap response: {data}")
+                return []
+    except urllib.error.URLError as e:
+        logger.warning(f"Failed to fetch bootstrap peers from {url}: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON from bootstrap URL {url}: {e}")
+        return []
+
+
 def run():
     args = parser.parse_args()
     if args.private_key is not None:
@@ -66,6 +94,10 @@ def run():
         parser.error("--tracker-url or --bootstrap-peers required for hybrid mode")
 
     logging.basicConfig(level=args.loglevel)
+
+    # Fetch bootstrap peers from URL if needed
+    if args.mode in ("libp2p", "hybrid") and not args.bootstrap_peers and args.bootstrap_url:
+        args.bootstrap_peers = fetch_bootstrap_peers(args.bootstrap_url)
 
     trio.run(main, args)
 

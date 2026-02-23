@@ -374,6 +374,46 @@ async def pull_wan_nar(req: Request) -> Response:
         return Response(content="Gone", status_code=404)
 
 
+# LibP2P bootstrap endpoint - returns multiaddr for peer discovery
+@app.route("/bootstrap")
+async def bootstrap(req: Request) -> Response:
+    """Return bootstrap peer multiaddr for libp2p peer discovery."""
+    if p2p_access is None:
+        return Response(content='{"error": "LibP2P not enabled"}', status_code=404,
+                       media_type="application/json")
+
+    host = p2p_access.get("host")
+    if host is None:
+        return Response(content='{"error": "LibP2P host not available"}', status_code=503,
+                       media_type="application/json")
+
+    peer_id = str(host.peer_id)
+    # Get public addresses (filter out 0.0.0.0)
+    addrs = []
+    for addr in host.addrs:
+        addr_str = str(addr)
+        if "/0.0.0.0/" not in addr_str and "/127.0.0.1/" not in addr_str:
+            addrs.append(addr_str)
+
+    # If no public addrs, try to construct from request host
+    if not addrs:
+        # Use request host as fallback
+        client_host = req.headers.get("X-Forwarded-For", req.client.host)
+        if client_host and client_host not in ("127.0.0.1", "localhost"):
+            addrs.append(f"/ip4/{client_host}/tcp/13304/p2p/{peer_id}")
+
+    import json
+    return Response(
+        content=json.dumps({
+            "peer_id": peer_id,
+            "multiaddrs": addrs,
+            "network_id": p2p_access.get("dht").config.network_id if p2p_access.get("dht") else None,
+        }),
+        status_code=200,
+        media_type="application/json"
+    )
+
+
 # LibP2P status endpoint (must be before the catch-all path route)
 @app.route("/v4/libp2p/status")
 async def libp2p_status(req: Request) -> Response:
