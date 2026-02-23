@@ -153,11 +153,14 @@ in
       # LibP2P options
       bootstrapPeers = lib.mkOption {
         type = types.listOf types.str;
-        default = [];
-        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmPeerID" ];
+        default = [
+          # Default public bootstrap node (DigitalOcean)
+          "/ip4/164.92.164.113/tcp/13304/p2p/16Uiu2HAm2CrgTJiuHtSjSf3HBT2HPiK2sR2Sq4QHoWE3f6pukR2G"
+        ];
+        example = [ "/ip4/1.2.3.4/tcp/13304/p2p/QmPeerID" ];
         description = ''
           LibP2P bootstrap peer multiaddrs for DHT initialization.
-          Required for libp2p mode to discover peers outside local network.
+          Defaults to public peerix bootstrap node for the "default" network.
         '';
       };
 
@@ -172,13 +175,12 @@ in
       };
 
       networkId = lib.mkOption {
-        type = types.nullOr types.str;
-        default = null;
+        type = types.str;
+        default = "default";
         example = "my-private-network";
         description = ''
           Network identifier for DHT peer discovery.
           Peers with the same network ID will discover each other.
-          If null, uses default public network or derives from tracker URL.
         '';
       };
 
@@ -300,8 +302,7 @@ in
             "--bootstrap-peers ${lib.concatStringsSep " " cfg.bootstrapPeers}";
           relayArgs = lib.optionalString (cfg.relayServers != [])
             "--relay-servers ${lib.concatStringsSep " " cfg.relayServers}";
-          networkIdArgs = lib.optionalString (cfg.networkId != null)
-            "--network-id ${cfg.networkId}";
+          networkIdArgs = "--network-id ${cfg.networkId}";
           listenAddrsArgs = lib.optionalString (cfg.listenAddrs != [])
             "--listen-addrs ${lib.concatStringsSep " " cfg.listenAddrs}";
           ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
