@@ -9,8 +9,9 @@ Provides peer discovery and content routing using DHT keys:
 import typing as t
 import logging
 import hashlib
-import asyncio
 from dataclasses import dataclass
+
+import trio
 
 from libp2p.peer.id import ID as PeerID
 from libp2p.peer.peerinfo import PeerInfo
@@ -54,10 +55,9 @@ class PeerixDHT:
     def __init__(self, host: "LibP2PHost", config: DHTConfig):
         self.host = host
         self.config = config
-        self._announce_task: t.Optional[asyncio.Task] = None
-        self._discovery_task: t.Optional[asyncio.Task] = None
         self._discovered_peers: t.Set[str] = set()
         self._is_running = False
+        self._cancel_scope: t.Optional[trio.CancelScope] = None
 
     @property
     def network_key(self) -> str:
@@ -67,7 +67,7 @@ class PeerixDHT:
             return f"{DHT_PREFIX_NETWORK}/{network_hash}"
         return f"{DHT_PREFIX_NETWORK}/default"
 
-    async def start(self) -> None:
+    async def start(self, nursery: t.Optional[trio.Nursery] = None) -> None:
         """Start DHT announcement and discovery tasks."""
         if self._is_running:
             return
@@ -75,31 +75,25 @@ class PeerixDHT:
         self._is_running = True
         logger.info(f"Starting DHT with network key: {self.network_key}")
 
-        # Start periodic announcement
-        self._announce_task = asyncio.create_task(self._announce_loop())
+        # If a nursery is provided, start background tasks
+        if nursery is not None:
+            self._cancel_scope = trio.CancelScope()
+            nursery.start_soon(self._run_loops)
 
-        # Start periodic discovery
-        self._discovery_task = asyncio.create_task(self._discovery_loop())
+    async def _run_loops(self) -> None:
+        """Run announcement and discovery loops."""
+        with self._cancel_scope:
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(self._announce_loop)
+                nursery.start_soon(self._discovery_loop)
 
     async def stop(self) -> None:
         """Stop DHT tasks."""
         self._is_running = False
 
-        if self._announce_task:
-            self._announce_task.cancel()
-            try:
-                await self._announce_task
-            except asyncio.CancelledError:
-                pass
-            self._announce_task = None
-
-        if self._discovery_task:
-            self._discovery_task.cancel()
-            try:
-                await self._discovery_task
-            except asyncio.CancelledError:
-                pass
-            self._discovery_task = None
+        if self._cancel_scope is not None:
+            self._cancel_scope.cancel()
+            self._cancel_scope = None
 
         logger.info("DHT stopped")
 
@@ -211,7 +205,7 @@ class PeerixDHT:
             except Exception as e:
                 logger.warning(f"Announcement failed: {e}")
 
-            await asyncio.sleep(self.config.announce_interval)
+            await trio.sleep(self.config.announce_interval)
 
     async def _discovery_loop(self) -> None:
         """Periodically discover new peers."""
@@ -229,7 +223,7 @@ class PeerixDHT:
             except Exception as e:
                 logger.warning(f"Discovery failed: {e}")
 
-            await asyncio.sleep(self.config.discovery_interval)
+            await trio.sleep(self.config.discovery_interval)
 
     def get_discovered_peers(self) -> t.Set[str]:
         """Get the set of discovered peer IDs."""

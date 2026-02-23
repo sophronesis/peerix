@@ -18,7 +18,7 @@ logger = logging.getLogger("peerix.libp2p.protocols")
 # Try to import libp2p types
 try:
     from libp2p.network.stream.net_stream import NetStream
-    from libp2p.typing import TProtocol
+    from libp2p.custom_types import TProtocol
 except ImportError:
     NetStream = t.Any
     TProtocol = str

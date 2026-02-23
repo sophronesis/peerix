@@ -56,19 +56,16 @@ let
     doCheck = false;
   };
 
-  # py-multihash
+  # py-multihash 3.0.0 - has Func class required by libp2p 0.6.0
   py-multihash = buildPythonPackage rec {
     pname = "py-multihash";
-    version = "0.2.3";
-    pyproject = true;
-    src = fetchPypi {
-      inherit pname version;
-      sha256 = "sha256-8K3k3oIK/cS0qqQEZOyGydpcrjpFeM2i2qtLDrflsY0=";
+    version = "3.0.0";
+    format = "wheel";
+    src = pkgs.fetchurl {
+      url = "https://files.pythonhosted.org/packages/24/e2/d65606db8369916fb5a9b4fe14df7e6072970d919300f3fb1c989a1d8e7d/py_multihash-3.0.0-py3-none-any.whl";
+      sha256 = "sha256-OGPsExO06sHlFpE3wUPUC/d0VuVziPg5RB3roIn4cyY=";
     };
-    build-system = [ setuptools pytest-runner ];
-    dependencies = [ python.pkgs.base58 python.pkgs.six python.pkgs.varint morphys ];
-    # Skip runtime deps check due to base58 version mismatch (works anyway)
-    dontCheckRuntimeDeps = true;
+    dependencies = [ morphys python.pkgs.base58 python.pkgs.varint ];
     doCheck = false;
   };
 
@@ -176,6 +173,8 @@ let
       # From nixpkgs
       aioquic
       base58
+      blake3
+      mmh3
       coincurve
       fastecdsa
       httpx

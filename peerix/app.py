@@ -3,7 +3,7 @@ import contextlib
 import uuid
 import typing as t
 
-import aiohttp
+import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.applications import Starlette
@@ -146,14 +146,14 @@ async def _setup_wan(local_store, local_port, tracker_url, no_verify,
     tracker_client = TrackerClient(tracker_url, peer_id, local_port)
     await tracker_client.start_heartbeat()
 
-    session = aiohttp.ClientSession()
-    tracker_store = TrackerStore(serving_store, tracker_client, session)
+    client = httpx.AsyncClient()
+    tracker_store = TrackerStore(serving_store, tracker_client, client)
     wan_access = PrefixStore("v3/wan", tracker_store)
 
     return {
         "access": wan_access,
         "tracker_client": tracker_client,
-        "session": session,
+        "client": client,
         "verified_store": verified_store,
         "serving_store": serving_store,
     }
@@ -163,8 +163,9 @@ async def _cleanup_wan(wan_info):
     if wan_info is None:
         return
     await wan_info["tracker_client"].close()
-    if not wan_info["session"].closed:
-        await wan_info["session"].close()
+    client = wan_info.get("client")
+    if client is not None and not client.is_closed:
+        await client.aclose()
     vs = wan_info.get("verified_store")
     if vs is not None:
         await vs.close()

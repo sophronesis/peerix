@@ -1,11 +1,10 @@
 import os
 import logging
-import asyncio
 import argparse
 
-import uvloop
+import trio
 from hypercorn import Config
-from hypercorn.asyncio import serve
+from hypercorn.trio import serve
 
 from peerix.app import app, setup_stores
 
@@ -67,9 +66,8 @@ def run():
         parser.error("--tracker-url or --bootstrap-peers required for hybrid mode")
 
     logging.basicConfig(level=args.loglevel)
-    uvloop.install()
 
-    asyncio.run(main(args))
+    trio.run(main, args)
 
 
 async def main(args):

@@ -26,8 +26,8 @@
 
       # Core packages - required for basic functionality (lan/wan modes)
       corePackages = with python.pkgs; [
-        aiohttp
-        uvloop
+        trio
+        httpx
         hypercorn
         starlette
         psutil

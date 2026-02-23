@@ -2,8 +2,10 @@ import json
 import math
 import time
 import sqlite3
-import asyncio
 import logging
+from contextlib import asynccontextmanager
+
+import trio
 
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
@@ -60,20 +62,27 @@ def compute_score(total_shared: int, successful: int, failed: int) -> float:
     return (successful / (successful + failed + 1)) * math.log(total_shared + 1)
 
 
+async def cleanup_stale_peers(conn):
+    """Background task to clean up stale peers."""
+    while True:
+        await trio.sleep(CLEANUP_INTERVAL)
+        cutoff = time.time() - PEER_TTL
+        conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
+        conn.commit()
+
+
 def create_tracker_app(db_path: str) -> Starlette:
     conn = init_db(db_path)
-    app = Starlette()
 
-    async def cleanup_stale_peers():
-        while True:
-            await asyncio.sleep(CLEANUP_INTERVAL)
-            cutoff = time.time() - PEER_TTL
-            conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
-            conn.commit()
+    @asynccontextmanager
+    async def lifespan(app):
+        # Start cleanup task in background
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(cleanup_stale_peers, conn)
+            yield
+            nursery.cancel_scope.cancel()
 
-    @app.on_event("startup")
-    async def startup():
-        asyncio.create_task(cleanup_stale_peers())
+    app = Starlette(lifespan=lifespan)
 
     @app.route("/announce", methods=["POST"])
     async def announce(req: Request) -> Response:

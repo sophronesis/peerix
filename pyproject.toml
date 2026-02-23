@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 dependencies = [
-    "aiohttp",
-    "uvloop",
+    "trio",
+    "httpx",
     "hypercorn",
     "starlette",
     "psutil",

@@ -6,7 +6,8 @@ narinfo queries and NAR transfers.
 """
 import typing as t
 import logging
-import asyncio
+
+import trio
 
 from libp2p.peer.peerinfo import PeerInfo
 
@@ -93,41 +94,36 @@ class LibP2PStore(Store):
             return None
 
         # Query peers in parallel, return first successful result
-        tasks = [
-            asyncio.create_task(self._query_peer_narinfo(peer, hsh))
-            for peer in peers
-        ]
+        result: t.Optional[NarInfo] = None
 
-        for task in asyncio.as_completed(tasks):
+        async def query_peer(peer: PeerInfo, cancel_scope: trio.CancelScope) -> None:
+            nonlocal result
             try:
-                result = await asyncio.wait_for(task, timeout=self.request_timeout)
-                if result is not None:
-                    # Cancel remaining tasks
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    return result
-            except asyncio.TimeoutError:
-                continue
+                with trio.move_on_after(self.request_timeout):
+                    r = await self._query_peer_narinfo(peer, hsh)
+                    if r is not None and result is None:
+                        result = r
+                        cancel_scope.cancel()
             except Exception as e:
                 logger.debug(f"Query failed: {e}")
-                continue
 
-        logger.debug(f"No libp2p peer has {hsh}")
-        return None
+        async with trio.open_nursery() as nursery:
+            for peer in peers:
+                nursery.start_soon(query_peer, peer, nursery.cancel_scope)
+
+        if result is None:
+            logger.debug(f"No libp2p peer has {hsh}")
+
+        return result
 
     async def _query_peer_narinfo(self, peer: PeerInfo, hsh: str) -> t.Optional[NarInfo]:
         """Query a specific peer for narinfo."""
         try:
-            stream = await asyncio.wait_for(
-                self.host.new_stream(peer.peer_id, [PROTOCOL_NARINFO]),
-                timeout=10.0
-            )
+            with trio.fail_after(10.0):
+                stream = await self.host.new_stream(peer.peer_id, [PROTOCOL_NARINFO])
 
-            result = await asyncio.wait_for(
-                request_narinfo(stream, hsh),
-                timeout=self.request_timeout
-            )
+            with trio.fail_after(self.request_timeout):
+                result = await request_narinfo(stream, hsh)
 
             if result is not None:
                 # Rewrite URL to route through our libp2p endpoint
@@ -135,7 +131,7 @@ class LibP2PStore(Store):
                 logger.info(f"Found {hsh} at libp2p peer {peer.peer_id}")
                 return result._replace(url=libp2p_url)
 
-        except asyncio.TimeoutError:
+        except trio.TooSlowError:
             logger.debug(f"Timeout querying peer {peer.peer_id} for {hsh}")
         except Exception as e:
             logger.debug(f"Failed to query peer {peer.peer_id} for {hsh}: {e}")
@@ -186,10 +182,8 @@ class LibP2PStore(Store):
         self._active_transfers[hsh] = 0
 
         try:
-            stream = await asyncio.wait_for(
-                self.host.new_stream(peer.peer_id, [PROTOCOL_NAR]),
-                timeout=10.0
-            )
+            with trio.fail_after(10.0):
+                stream = await self.host.new_stream(peer.peer_id, [PROTOCOL_NAR])
 
             total_bytes = 0
             async for chunk in request_nar(stream, nar_url):
@@ -199,7 +193,7 @@ class LibP2PStore(Store):
 
             logger.info(f"LibP2P transfer from {peer.peer_id}: {total_bytes} bytes")
 
-        except asyncio.TimeoutError:
+        except trio.TooSlowError:
             raise FileNotFoundError(f"Timeout streaming NAR from {peer.peer_id}")
         except Exception as e:
             raise FileNotFoundError(f"NAR stream failed from {peer.peer_id}: {e}")
@@ -250,27 +244,24 @@ class HybridStore(Store):
 
         Queries both in parallel and returns the first successful result.
         """
-        tasks = [
-            asyncio.create_task(self.libp2p_store.narinfo(hsh))
-        ]
+        result: t.Optional[NarInfo] = None
 
-        if self.tracker_store is not None:
-            tasks.append(asyncio.create_task(self.tracker_store.narinfo(hsh)))
-
-        for task in asyncio.as_completed(tasks):
+        async def query_store(store: Store, cancel_scope: trio.CancelScope) -> None:
+            nonlocal result
             try:
-                result = await task
-                if result is not None:
-                    # Cancel remaining tasks
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    return result
+                r = await store.narinfo(hsh)
+                if r is not None and result is None:
+                    result = r
+                    cancel_scope.cancel()
             except Exception as e:
                 logger.debug(f"Hybrid query failed: {e}")
-                continue
 
-        return None
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(query_store, self.libp2p_store, nursery.cancel_scope)
+            if self.tracker_store is not None:
+                nursery.start_soon(query_store, self.tracker_store, nursery.cancel_scope)
+
+        return result
 
     async def nar(self, url: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
         """

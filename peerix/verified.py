@@ -2,7 +2,7 @@ import typing as t
 import logging
 import time
 
-import aiohttp
+import httpx
 
 from peerix.store import NarInfo, CacheInfo, Store
 
@@ -18,16 +18,16 @@ class VerifiedStore(Store):
         self.backend = backend
         self.upstream_cache = upstream_cache.rstrip("/")
         self._verification_cache: t.Dict[str, t.Tuple[bool, float]] = {}
-        self._session: t.Optional[aiohttp.ClientSession] = None
+        self._client: t.Optional[httpx.AsyncClient] = None
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def close(self):
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     async def _verify_hash(self, hsh: str, nar_hash: str) -> bool:
         now = time.monotonic()
@@ -38,39 +38,39 @@ class VerifiedStore(Store):
             if now - ts < CACHE_TTL:
                 return result
 
-        session = await self._get_session()
+        client = await self._get_client()
         try:
-            async with session.get(f"{self.upstream_cache}/{hsh}.narinfo") as resp:
-                if resp.status != 200:
-                    logger.debug(f"{hsh} not found in upstream cache")
-                    self._verification_cache[hsh] = (False, now)
-                    return False
+            resp = await client.get(f"{self.upstream_cache}/{hsh}.narinfo")
+            if resp.status_code != 200:
+                logger.debug(f"{hsh} not found in upstream cache")
+                self._verification_cache[hsh] = (False, now)
+                return False
 
-                text = await resp.text()
-                upstream_nar_hash = None
-                for line in text.splitlines():
-                    if ":" not in line:
-                        continue
-                    k, v = line.split(":", 1)
-                    if k.strip() == "NarHash":
-                        upstream_nar_hash = v.strip()
-                        break
+            text = resp.text
+            upstream_nar_hash = None
+            for line in text.splitlines():
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                if k.strip() == "NarHash":
+                    upstream_nar_hash = v.strip()
+                    break
 
-                if upstream_nar_hash is None:
-                    logger.warning(f"{hsh} upstream narinfo has no NarHash")
-                    self._verification_cache[hsh] = (False, now)
-                    return False
+            if upstream_nar_hash is None:
+                logger.warning(f"{hsh} upstream narinfo has no NarHash")
+                self._verification_cache[hsh] = (False, now)
+                return False
 
-                match = nar_hash == upstream_nar_hash
-                if not match:
-                    logger.warning(f"{hsh} NarHash mismatch: local={nar_hash} upstream={upstream_nar_hash}")
-                else:
-                    logger.debug(f"{hsh} verified against upstream")
+            match = nar_hash == upstream_nar_hash
+            if not match:
+                logger.warning(f"{hsh} NarHash mismatch: local={nar_hash} upstream={upstream_nar_hash}")
+            else:
+                logger.debug(f"{hsh} verified against upstream")
 
-                self._verification_cache[hsh] = (match, now)
-                return match
+            self._verification_cache[hsh] = (match, now)
+            return match
 
-        except aiohttp.ClientError as e:
+        except httpx.HTTPError as e:
             logger.warning(f"Failed to verify {hsh} against upstream: {e}")
             return False
 
