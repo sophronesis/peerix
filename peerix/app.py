@@ -388,19 +388,24 @@ async def bootstrap(req: Request) -> Response:
                        media_type="application/json")
 
     peer_id = str(host.peer_id)
-    # Get public addresses (filter out 0.0.0.0)
+    # Get public addresses (filter out 0.0.0.0 and 127.0.0.1)
     addrs = []
     for addr in host.addrs:
         addr_str = str(addr)
         if "/0.0.0.0/" not in addr_str and "/127.0.0.1/" not in addr_str:
             addrs.append(addr_str)
 
-    # If no public addrs, try to construct from request host
+    # If no public addrs, try to get server's actual public IP
     if not addrs:
-        # Use request host as fallback
-        client_host = req.headers.get("X-Forwarded-For", req.client.host)
-        if client_host and client_host not in ("127.0.0.1", "localhost"):
-            addrs.append(f"/ip4/{client_host}/tcp/13304/p2p/{peer_id}")
+        import urllib.request
+        try:
+            # Fetch server's public IP (not client's)
+            with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
+                public_ip = resp.read().decode().strip()
+                if public_ip:
+                    addrs.append(f"/ip4/{public_ip}/tcp/13304/p2p/{peer_id}")
+        except Exception:
+            pass
 
     import json
     return Response(
