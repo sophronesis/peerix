@@ -4,10 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Peerix is a peer-to-peer binary cache for Nix. It supports two discovery modes:
+Peerix is a peer-to-peer binary cache for Nix. It supports multiple discovery modes:
 - **LAN**: UDP broadcast for zero-config peer discovery on local networks.
 - **WAN**: Tracker-based discovery for peers across different networks (NAT, VPN, cloud).
 - **Both**: LAN and WAN simultaneously.
+- **LibP2P**: P2P networking with NAT traversal using libp2p (DHT, mDNS, hole punching).
+- **Hybrid**: LibP2P combined with tracker for maximum compatibility.
 
 ## Build & Run
 
@@ -67,10 +69,20 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to localhost (IPv4 and IPv6). `/local/*` endpoints enforce peer auth when SSH keys are configured (X-Peerix-* headers). Includes ed25519 narinfo signing via `pynacl` when `NIX_SECRET_KEY_FILE` is set. Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v3/wan/` for WAN.
 - **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--announce-addr`, `--peer-id`, `--ssh-public-key`, `--ssh-private-key`, `--no-verify`, `--no-filter`, etc.
 
+### LibP2P modules (`peerix/`)
+
+- **`libp2p_host.py`** — LibP2P host wrapper with NAT traversal. Creates and manages py-libp2p host with Kademlia DHT, TCP transport on port 13304 (HTTP port + 1000). Implements `PeerixNotifee` for bidirectional peer tracking via INotifee callbacks. Key methods: `start()`, `stop()`, `connect_to_peer()`, `new_stream()`, `provide()`, `find_providers()`, `get_peers()`.
+- **`libp2p_dht.py`** — DHT-based peer discovery. Uses network keys like `/peerix/v1/network/{hash}` for peer grouping. Supports `announce()` to publish presence, `discover_peers()` to find peers in network, `find_path_providers()` to locate peers with specific store paths.
+- **`libp2p_store.py`** — Store implementation using libp2p streams. `LibP2PStore` routes narinfo/NAR queries to peers via libp2p protocols. `HybridStore` combines libp2p and tracker-based discovery for fallback.
+- **`libp2p_protocols.py`** — Wire protocols for peerix over libp2p:
+  - `/peerix/narinfo/1.0.0`: Length-prefixed JSON messages for narinfo queries
+  - `/peerix/nar/1.0.0`: Chunked NAR streaming with 10MB chunks
+
 ### Network protocol
 
 - **LAN**: UDP port 12304 (configurable) — peer discovery via broadcast. Packet byte 0 is message type (0=request, 1=response), bytes 1-4 are request ID.
 - **WAN**: Peers announce to tracker via HTTP POST `/announce`. Tracker responds with peer list at GET `/peers`. Transfers are tracked via `/transfer/init` and `/transfer/report`.
+- **LibP2P**: TCP port 13304 (HTTP port + 1000) — P2P connections with Kademlia DHT for peer discovery. Uses custom protocols `/peerix/narinfo/1.0.0` and `/peerix/nar/1.0.0` for store queries. Network isolation via `--network-id` (hashed to DHT key). Bootstrap peers specified via `--bootstrap-peers` multiaddr format (e.g., `/ip4/1.2.3.4/tcp/13304/p2p/QmPeerID`).
 - **HTTP port 12304** (configurable): serves local narinfo/NAR to peers and proxied remote/WAN content to the local nix daemon.
 
 ### NixOS integration
@@ -96,6 +108,10 @@ Optional SSH ed25519 key-based authentication. When `--ssh-public-key` and `--ss
 - **Transfer roles**: In `tracker_client.py`, `init_transfer(sender_id)` — the caller is the *receiver* (fetching the NAR), the argument is the *sender* (the peer providing the NAR).
 - **`/{hash}.narinfo` is restricted to 127.0.0.1**: External peers must use `/local/{hash}.narinfo` instead. This is by design — the main narinfo endpoint is for the local nix daemon only.
 - **`nix-build --option require-sigs false`**: Even with `trusted-users`, this may not work in all nix versions. Prefer proper signing with `NIX_SECRET_KEY_FILE` and `trusted-public-keys`.
+- **LibP2P peer ID changes**: Each peerix restart generates a new peer ID. For stable IDs, use `--ssh-public-key` or implement persistent key storage.
+- **py-libp2p 0.6.0 API**: Methods like `provide()` and `find_providers()` on KadDHT are async. The `INotifee` connected callback receives `SwarmConn` which wraps `muxed_conn` with `peer_id` attribute (not `INetConn.get_remote_peer()`).
+- **LibP2P NAT traversal**: Requires a publicly accessible bootstrap peer. Peers behind NAT cannot be directly connected to without hole punching or relay servers.
+- **LibP2P port**: Uses HTTP port + 1000 (default: 13304) for libp2p TCP connections. Both ports need firewall rules.
 
 ## Test VM (`test-vm/`)
 

@@ -403,8 +403,9 @@ async def pull_libp2p_nar(req: Request) -> Response:
     if p2p_access is None:
         return Response(content="LibP2P mode not enabled", status_code=404)
     try:
+        # The path already starts with libp2p/peer_id/hash/url
         return StreamingResponse(
-            await p2p_access["access"].nar(f"v4/libp2p/{req.path_params['path']}"),
+            await p2p_access["access"].nar(req.path_params['path']),
             media_type="text/plain",
         )
     except FileNotFoundError:

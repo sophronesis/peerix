@@ -11,11 +11,13 @@ Peerix implements a nix binary cache. When the nix package manager queries peeri
 will ask the network if any other peerix instances hold the package, and if some other instance
 holds the derivation, it will download the derivation from that instance.
 
-Peerix supports two discovery modes:
+Peerix supports multiple discovery modes:
 
 - **LAN** (default): UDP broadcast on the local network for zero-config peer discovery.
 - **WAN**: Tracker-based discovery for peers across different networks (NAT, VPN, cloud, etc).
 - **Both**: LAN and WAN simultaneously.
+- **LibP2P**: P2P networking with NAT traversal using libp2p (DHT, mDNS, hole punching).
+- **Hybrid**: LibP2P combined with tracker for maximum compatibility.
 
 Installation
 ------------
@@ -68,7 +70,7 @@ Configuration Options
 | `services.peerix.enable`         | Enables Peerix.                                                                              | `false`   |
 | `services.peerix.openFirewall`   | Open the necessary firewall ports.                                                           | `true`    |
 | `services.peerix.port`           | Port for the HTTP server and peer announcements.                                             | `12304`   |
-| `services.peerix.mode`           | Discovery mode: `"lan"`, `"wan"`, or `"both"`.                                               | `"lan"`   |
+| `services.peerix.mode`           | Discovery mode: `"lan"`, `"wan"`, `"both"`, `"libp2p"`, or `"hybrid"`.                       | `"lan"`   |
 | `services.peerix.user`           | User to run the peerix service under.                                                        | `"nobody"`|
 | `services.peerix.group`          | Group to run the peerix service under.                                                       | `"nobody"`|
 | `services.peerix.privateKeyFile` | Path to the private key file for signing derivations.                                        | `null`    |
@@ -98,6 +100,15 @@ Configuration Options
 | `services.peerix.tracker.port`        | Port for the tracker server.                                                             | `12305`   |
 | `services.peerix.tracker.dbPath`      | Path to the tracker SQLite database.                                                     | `"/var/lib/peerix-tracker/tracker.db"` |
 | `services.peerix.tracker.openFirewall`| Open the firewall for the tracker port.                                                  | `true`    |
+
+### LibP2P Options
+
+| Option                               | Description                                                                              | Default   |
+|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
+| `services.peerix.bootstrapPeers`      | LibP2P bootstrap peer multiaddrs for DHT initialization.                                 | `[]`      |
+| `services.peerix.relayServers`        | LibP2P relay server multiaddrs for NAT traversal fallback.                               | `[]`      |
+| `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `null`    |
+| `services.peerix.listenAddrs`         | LibP2P listen addresses. Note: py-libp2p 0.6.0 only supports TCP.                        | `["/ip4/0.0.0.0/tcp/{port+1000}"]` |
 
 WAN Mode
 --------
@@ -142,15 +153,92 @@ WAN mode includes several safety features:
 - **Narinfo signing**: When `NIX_SECRET_KEY_FILE` or `privateKeyFile` is set, narinfo responses are signed with ed25519, allowing peers to verify authenticity with `require-sigs = true`.
 - **Reputation tracking**: The tracker records transfer history for peer reputation.
 
+LibP2P Mode
+-----------
+
+LibP2P mode enables true peer-to-peer networking with built-in NAT traversal using the libp2p stack. This includes DHT-based peer discovery, mDNS for local network discovery, and hole punching for connecting peers behind NAT.
+
+### Setup
+
+1. Configure a bootstrap node on a publicly accessible host:
+
+```nix
+services.peerix = {
+  enable = true;
+  mode = "libp2p";
+  networkId = "my-network";  # Must match across all peers
+};
+```
+
+2. Get the bootstrap peer's multiaddr from the logs:
+
+```bash
+journalctl -u peerix -f | grep "LibP2P listening"
+# Output: LibP2P listening on: ['/ip4/1.2.3.4/tcp/13304']
+# Peer ID is also shown: peer_id=16Uiu2HAm...
+```
+
+3. Configure other peers to bootstrap from this node:
+
+```nix
+services.peerix = {
+  enable = true;
+  mode = "libp2p";
+  networkId = "my-network";
+  bootstrapPeers = [
+    "/ip4/1.2.3.4/tcp/13304/p2p/16Uiu2HAmXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  ];
+};
+```
+
+### NAT Traversal
+
+LibP2P handles NAT traversal automatically via:
+
+- **mDNS**: Discovers peers on the local network without configuration.
+- **DHT**: Kademlia distributed hash table for global peer discovery.
+- **Hole Punching**: Establishes direct connections between NAT'd peers.
+- **Relay**: Falls back to relay servers when direct connection fails.
+
+For peers behind restrictive NAT, you can configure relay servers:
+
+```nix
+services.peerix = {
+  enable = true;
+  mode = "libp2p";
+  networkId = "my-network";
+  bootstrapPeers = [ "/ip4/.../p2p/..." ];
+  relayServers = [ "/ip4/.../p2p/..." ];  # Optional relay fallback
+};
+```
+
+### Hybrid Mode
+
+Hybrid mode combines libp2p with the HTTP tracker for maximum compatibility:
+
+```nix
+services.peerix = {
+  enable = true;
+  mode = "hybrid";
+  networkId = "my-network";
+  bootstrapPeers = [ "/ip4/.../p2p/..." ];
+  trackerUrl = "http://tracker-host:12305";  # Also use HTTP tracker
+};
+```
+
+This allows peers using libp2p to connect with peers using the HTTP tracker.
+
 Network Protocol
 ----------------
 
 - **LAN**: UDP port 12304 (configurable) for broadcast-based peer discovery. Packet byte 0 is message type (0=request, 1=response), bytes 1-4 are request ID.
 - **WAN**: Peers announce to the tracker via HTTP. The tracker maintains a peer registry and transfer history in SQLite.
+- **LibP2P**: TCP port 13304 (HTTP port + 1000) for libp2p connections. Uses custom protocols `/peerix/narinfo/1.0.0` and `/peerix/nar/1.0.0` for narinfo queries and NAR transfers. DHT keys use `/peerix/v1/network/{network_id_hash}` namespace.
 - **HTTP**: Port 12304 (configurable) serves both local narinfo/NAR to peers and proxied remote content to the local nix daemon.
 
 Dependencies
 ------------
 
 - Python 3.12+: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `pynacl` (optional, for narinfo signing)
+- LibP2P mode: `libp2p`, `trio`, `trio-typing` (included in `peerix-full` package)
 - System: `nix`, `nix-serve`

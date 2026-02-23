@@ -150,17 +150,23 @@ class LibP2PStore(Store):
         Returns:
             Async iterable of NAR data chunks
         """
+        logger.debug(f"NAR request for URL: {url}")
+
         # Parse the URL
         parts = url.split("/", 3)
         if len(parts) < 4 or parts[0] != "libp2p":
+            logger.warning(f"Invalid libp2p NAR URL format: {url}, parts={parts}")
             raise FileNotFoundError(f"Invalid libp2p NAR URL: {url}")
 
         _, peer_id_str, hsh, nar_url = parts
+        logger.debug(f"Parsed NAR URL: peer={peer_id_str}, hash={hsh}, nar_url={nar_url}")
 
         # Find the peer
         peer = self._find_peer_by_id(peer_id_str)
+        logger.debug(f"Found peer by ID: {peer}")
         if peer is None:
             # Try to find via DHT
+            logger.debug(f"Peer not found locally, trying DHT for {hsh}")
             providers = await self.dht.find_path_providers(hsh)
             for p in providers:
                 if str(p.peer_id) == peer_id_str:
@@ -168,6 +174,7 @@ class LibP2PStore(Store):
                     break
 
         if peer is None:
+            logger.warning(f"Peer {peer_id_str} not found. Known peers: {[str(p.peer_id) for p in self.host.get_peers()]}")
             raise FileNotFoundError(f"Peer {peer_id_str} not found for NAR: {url}")
 
         return self._stream_nar(peer, nar_url, hsh)
