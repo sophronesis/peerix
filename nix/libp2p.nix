@@ -17,7 +17,7 @@ let
     doCheck = false;
   };
 
-  # morphys - dependency of multicodec (use wheel since sdist is gone from PyPI)
+  # morphys - dependency of py-multibase and py-multihash
   morphys = buildPythonPackage rec {
     pname = "morphys";
     version = "1.0";
@@ -29,17 +29,16 @@ let
     doCheck = false;
   };
 
-  # py-multicodec
+  # py-multicodec 1.0.0 - has Code class required by libp2p
   py-multicodec = buildPythonPackage rec {
     pname = "py-multicodec";
-    version = "0.2.1";
-    pyproject = true;
-    src = fetchPypi {
-      inherit pname version;
-      sha256 = "sha256-gwIf/owOJy0ZtbhrxbOe+mfI6fRzXObK/bwaznZ+xkc=";
+    version = "1.0.0";
+    format = "wheel";
+    src = pkgs.fetchurl {
+      url = "https://files.pythonhosted.org/packages/76/da/768d07490faeae88ac361184164be9c262fececc3c6241b5fc471be4f659/py_multicodec-1.0.0-py3-none-any.whl";
+      sha256 = "sha256-ri5oe6yP31Tj9bP+3tNrYaME1ePDr5Q490gfVD7BW40=";
     };
-    build-system = [ setuptools pytest-runner ];
-    dependencies = [ morphys python.pkgs.six python.pkgs.varint ];
+    dependencies = [ python.pkgs.varint ];
     doCheck = false;
   };
 
@@ -209,9 +208,8 @@ let
     # Skip tests - they require network access
     doCheck = false;
 
-    # NOTE: pythonImportsCheck disabled because py-multicodec 0.2.1 is incompatible
-    # with libp2p 0.6.0 (missing 'Code' class). The libp2p ecosystem on PyPI is
-    # very outdated. For production use, consider installing libp2p via pip instead.
+    # pythonImportsCheck disabled: libp2p imports multiaddr which initializes
+    # a DNS resolver that needs /etc/resolv.conf (unavailable in sandbox)
     # pythonImportsCheck = [ "libp2p" ];
 
     meta = with pkgs.lib; {
