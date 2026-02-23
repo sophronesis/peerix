@@ -34,7 +34,7 @@ parser.add_argument("--relay-servers", nargs="*", default=None,
 parser.add_argument("--network-id", default=None,
                     help="Network identifier for DHT peer discovery (peers with same ID discover each other)")
 parser.add_argument("--listen-addrs", nargs="*", default=None,
-                    help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT, /ip4/0.0.0.0/udp/PORT/quic-v1)")
+                    help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT)")
 parser.add_argument("--enable-ipfs-compat", action="store_true",
                     help="Enable IPFS compatibility layer (announce NARs to IPFS DHT)")
 

@@ -186,9 +186,10 @@ in
       listenAddrs = lib.mkOption {
         type = types.listOf types.str;
         default = [];
-        example = [ "/ip4/0.0.0.0/tcp/12304" "/ip4/0.0.0.0/udp/12304/quic-v1" ];
+        example = [ "/ip4/0.0.0.0/tcp/12304" ];
         description = ''
-          LibP2P listen multiaddrs. If empty, defaults to TCP and QUIC on the peerix port.
+          LibP2P listen multiaddrs. If empty, defaults to TCP on the peerix port.
+          Note: py-libp2p 0.6.0 only supports TCP, not QUIC.
         '';
       };
 
