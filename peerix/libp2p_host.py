@@ -68,8 +68,10 @@ class PeerixNotifee:
 
     async def connected(self, network: "INetwork", conn: "INetConn") -> None:
         """Called when a new connection is established (inbound or outbound)."""
+        logger.info("Notifee: connected callback triggered")
         try:
             peer_id = conn.get_remote_peer()
+            logger.info(f"Notifee: peer_id={peer_id}")
             # Get addresses from the connection's multiaddrs
             maddrs = conn.get_remote_multiaddr()
             addrs = [maddrs] if maddrs else []
@@ -82,9 +84,9 @@ class PeerixNotifee:
                 self._host._discovered_peers[peer_id_str] = peer_info
                 logger.info(f"Peer connected (tracked): {peer_id}")
             else:
-                logger.debug(f"Peer already tracked: {peer_id}")
+                logger.info(f"Peer already tracked: {peer_id}")
         except Exception as e:
-            logger.debug(f"Error in connected callback: {e}")
+            logger.warning(f"Error in connected callback: {e}", exc_info=True)
 
     async def disconnected(self, network: "INetwork", conn: "INetConn") -> None:
         """Called when a connection is closed."""
