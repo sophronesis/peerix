@@ -70,11 +70,16 @@ class PeerixNotifee:
         """Called when a new connection is established (inbound or outbound)."""
         logger.info("Notifee: connected callback triggered")
         try:
-            peer_id = conn.get_remote_peer()
+            # SwarmConn wraps muxed_conn which has peer_id
+            peer_id = conn.muxed_conn.peer_id
             logger.info(f"Notifee: peer_id={peer_id}")
-            # Get addresses from the connection's multiaddrs
-            maddrs = conn.get_remote_multiaddr()
-            addrs = [maddrs] if maddrs else []
+
+            # Get addresses from peerstore
+            addrs = []
+            try:
+                addrs = network.peerstore.addrs(peer_id)
+            except Exception:
+                pass
 
             # Create PeerInfo and add to discovered peers
             peer_info = PeerInfo(peer_id, addrs)
@@ -91,7 +96,8 @@ class PeerixNotifee:
     async def disconnected(self, network: "INetwork", conn: "INetConn") -> None:
         """Called when a connection is closed."""
         try:
-            peer_id = conn.get_remote_peer()
+            # SwarmConn wraps muxed_conn which has peer_id
+            peer_id = conn.muxed_conn.peer_id
             peer_id_str = str(peer_id)
 
             if peer_id_str in self._host._discovered_peers:
