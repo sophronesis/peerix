@@ -177,6 +177,10 @@ class LibP2PHost:
         if self.config.enable_dht:
             self._start_dht()
 
+        # Connect to bootstrap peers
+        if self.config.bootstrap_peers:
+            await self._connect_bootstrap_peers()
+
         # Connect to relay servers
         if self.config.enable_relay and self.config.relay_servers:
             await self._connect_relay_servers()
@@ -245,6 +249,17 @@ class LibP2PHost:
         except Exception as e:
             logger.warning(f"Failed to start DHT: {e}")
             self._dht = None
+
+    async def _connect_bootstrap_peers(self) -> None:
+        """Connect to bootstrap peers for peer discovery."""
+        for addr_str in self.config.bootstrap_peers:
+            try:
+                maddr = Multiaddr(addr_str)
+                peer_info = info_from_p2p_addr(maddr)
+                await self.connect(peer_info)
+                logger.info(f"Connected to bootstrap peer: {peer_info.peer_id}")
+            except Exception as e:
+                logger.warning(f"Failed to connect to bootstrap peer {addr_str}: {e}")
 
     async def _connect_relay_servers(self) -> None:
         """Connect to relay servers for NAT traversal fallback."""
