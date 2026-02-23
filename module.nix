@@ -155,7 +155,7 @@ in
         type = types.listOf types.str;
         default = [
           # Default public bootstrap node (DigitalOcean)
-          "/ip4/164.92.164.113/tcp/13304/p2p/16Uiu2HAm2CrgTJiuHtSjSf3HBT2HPiK2sR2Sq4QHoWE3f6pukR2G"
+          "/ip4/164.92.164.113/tcp/13304/p2p/16Uiu2HAmUVtceY9rBqFoCggBTNqnaJQcv9ajyLnbBoEsWUAFG4Ua"
         ];
         example = [ "/ip4/1.2.3.4/tcp/13304/p2p/QmPeerID" ];
         description = ''
