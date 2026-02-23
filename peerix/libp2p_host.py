@@ -28,7 +28,7 @@ try:
     from libp2p.peer.id import ID as PeerID
     from libp2p.peer.peerinfo import PeerInfo, info_from_p2p_addr
     from libp2p.custom_types import TProtocol
-    from libp2p.abc import IHost
+    from libp2p.abc import IHost, INotifee, INetwork, INetConn
     from multiaddr import Multiaddr
 
     # Import libp2p modules for DHT and discovery
@@ -47,9 +47,72 @@ except ImportError as e:
     BasicHost = t.Any
     KeyPair = t.Any
     IHost = t.Any
+    INotifee = t.Any
+    INetwork = t.Any
+    INetConn = t.Any
     KadDHT = t.Any
     DHTMode = t.Any
     MDNSDiscovery = t.Any
+
+
+class PeerixNotifee:
+    """
+    Network event handler for tracking peer connections.
+
+    Implements INotifee to receive callbacks when peers connect/disconnect,
+    ensuring bidirectional peer tracking (both inbound and outbound connections).
+    """
+
+    def __init__(self, host: "LibP2PHost"):
+        self._host = host
+
+    async def connected(self, network: "INetwork", conn: "INetConn") -> None:
+        """Called when a new connection is established (inbound or outbound)."""
+        try:
+            peer_id = conn.get_remote_peer()
+            # Get addresses from the connection's multiaddrs
+            maddrs = conn.get_remote_multiaddr()
+            addrs = [maddrs] if maddrs else []
+
+            # Create PeerInfo and add to discovered peers
+            peer_info = PeerInfo(peer_id, addrs)
+            peer_id_str = str(peer_id)
+
+            if peer_id_str not in self._host._discovered_peers:
+                self._host._discovered_peers[peer_id_str] = peer_info
+                logger.info(f"Peer connected (tracked): {peer_id}")
+            else:
+                logger.debug(f"Peer already tracked: {peer_id}")
+        except Exception as e:
+            logger.debug(f"Error in connected callback: {e}")
+
+    async def disconnected(self, network: "INetwork", conn: "INetConn") -> None:
+        """Called when a connection is closed."""
+        try:
+            peer_id = conn.get_remote_peer()
+            peer_id_str = str(peer_id)
+
+            if peer_id_str in self._host._discovered_peers:
+                del self._host._discovered_peers[peer_id_str]
+                logger.info(f"Peer disconnected (removed): {peer_id}")
+        except Exception as e:
+            logger.debug(f"Error in disconnected callback: {e}")
+
+    async def opened_stream(self, network: "INetwork", stream: "NetStream") -> None:
+        """Called when a new stream is opened."""
+        pass  # Not needed for peer tracking
+
+    async def closed_stream(self, network: "INetwork", stream: "NetStream") -> None:
+        """Called when a stream is closed."""
+        pass  # Not needed for peer tracking
+
+    async def listen(self, network: "INetwork", multiaddr: "Multiaddr") -> None:
+        """Called when we start listening on an address."""
+        logger.debug(f"Now listening on: {multiaddr}")
+
+    async def listen_close(self, network: "INetwork", multiaddr: "Multiaddr") -> None:
+        """Called when we stop listening on an address."""
+        logger.debug(f"Stopped listening on: {multiaddr}")
 
 
 @dataclass
@@ -173,6 +236,11 @@ class LibP2PHost:
         logger.info(f"LibP2P host started with peer ID: {self.peer_id}")
         logger.info(f"Listening on: {self.addrs}")
 
+        # Register notifee for bidirectional peer tracking
+        notifee = PeerixNotifee(self)
+        self._host.get_network().register_notifee(notifee)
+        logger.debug("Registered network notifee for peer tracking")
+
         # Start DHT if enabled
         if self.config.enable_dht:
             self._start_dht()
@@ -282,24 +350,24 @@ class LibP2PHost:
             logger.debug(f"DHT find_peer failed for {peer_id}: {e}")
             return None
 
-    def provide(self, key: str) -> bool:
+    async def provide(self, key: str) -> bool:
         """Announce that we provide a key (for content routing). Returns success."""
         if self._dht is None:
             return False
         try:
-            result = self._dht.provide(key)
+            result = await self._dht.provide(key)
             logger.debug(f"Announced as provider for: {key}")
             return result
         except Exception as e:
             logger.debug(f"Failed to announce provider for {key}: {e}")
             return False
 
-    def find_providers(self, key: str, count: int = 20) -> t.List[PeerInfo]:
-        """Find providers for a key via DHT (synchronous)."""
+    async def find_providers(self, key: str, count: int = 20) -> t.List[PeerInfo]:
+        """Find providers for a key via DHT."""
         if self._dht is None:
             return []
         try:
-            return self._dht.find_providers(key, count)
+            return await self._dht.find_providers(key, count)
         except Exception as e:
             logger.debug(f"Failed to find providers for {key}: {e}")
             return []
