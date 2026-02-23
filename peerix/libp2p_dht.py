@@ -97,14 +97,15 @@ class PeerixDHT:
 
         logger.info("DHT stopped")
 
-    async def announce(self) -> None:
-        """Announce ourselves as a peerix peer on the network."""
-        await self.host.provide(self.network_key)
+    def announce(self) -> bool:
+        """Announce ourselves as a peerix peer on the network. Returns success."""
+        result = self.host.provide(self.network_key)
         logger.debug(f"Announced on network: {self.network_key}")
+        return result
 
-    async def discover_peers(self) -> t.List[PeerInfo]:
-        """Discover peerix peers on the network."""
-        providers = await self.host.find_providers(
+    def discover_peers(self) -> t.List[PeerInfo]:
+        """Discover peerix peers on the network (synchronous)."""
+        providers = self.host.find_providers(
             self.network_key,
             count=self.config.max_providers_per_key
         )
@@ -119,21 +120,25 @@ class PeerixDHT:
 
         return new_peers
 
-    async def announce_nar(self, nar_hash: str) -> None:
+    def announce_nar(self, nar_hash: str) -> bool:
         """
         Announce that we have a NAR with the given hash.
 
         Args:
             nar_hash: The NAR hash (sha256:base32... format)
+
+        Returns:
+            True if announcement succeeded
         """
         # Normalize the hash for DHT key
         key = self._nar_key(nar_hash)
-        await self.host.provide(key)
+        result = self.host.provide(key)
         logger.debug(f"Announced NAR: {key}")
+        return result
 
-    async def find_nar_providers(self, nar_hash: str) -> t.List[PeerInfo]:
+    def find_nar_providers(self, nar_hash: str) -> t.List[PeerInfo]:
         """
-        Find peers that have a NAR with the given hash.
+        Find peers that have a NAR with the given hash (synchronous).
 
         Args:
             nar_hash: The NAR hash to find providers for
@@ -142,14 +147,14 @@ class PeerixDHT:
             List of peer infos that have this NAR
         """
         key = self._nar_key(nar_hash)
-        providers = await self.host.find_providers(
+        providers = self.host.find_providers(
             key,
             count=self.config.max_providers_per_key
         )
         logger.debug(f"Found {len(providers)} providers for NAR: {nar_hash}")
         return providers
 
-    async def announce_path(self, store_path_hash: str) -> None:
+    def announce_path(self, store_path_hash: str) -> bool:
         """
         Announce that we have a store path with the given hash.
 
@@ -157,14 +162,18 @@ class PeerixDHT:
 
         Args:
             store_path_hash: The store path hash (32 char prefix)
+
+        Returns:
+            True if announcement succeeded
         """
         key = f"{DHT_PREFIX_PATH}/{store_path_hash}"
-        await self.host.provide(key)
+        result = self.host.provide(key)
         logger.debug(f"Announced path: {key}")
+        return result
 
-    async def find_path_providers(self, store_path_hash: str) -> t.List[PeerInfo]:
+    def find_path_providers(self, store_path_hash: str) -> t.List[PeerInfo]:
         """
-        Find peers that have a store path with the given hash.
+        Find peers that have a store path with the given hash (synchronous).
 
         Args:
             store_path_hash: The store path hash to find
@@ -173,7 +182,7 @@ class PeerixDHT:
             List of peer infos that have this path
         """
         key = f"{DHT_PREFIX_PATH}/{store_path_hash}"
-        providers = await self.host.find_providers(
+        providers = self.host.find_providers(
             key,
             count=self.config.max_providers_per_key
         )
@@ -201,7 +210,7 @@ class PeerixDHT:
         """Periodically announce ourselves."""
         while self._is_running:
             try:
-                await self.announce()
+                self.announce()
             except Exception as e:
                 logger.warning(f"Announcement failed: {e}")
 
@@ -211,7 +220,7 @@ class PeerixDHT:
         """Periodically discover new peers."""
         while self._is_running:
             try:
-                new_peers = await self.discover_peers()
+                new_peers = self.discover_peers()
 
                 # Connect to newly discovered peers
                 for peer in new_peers:

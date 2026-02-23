@@ -79,8 +79,8 @@ class LibP2PStore(Store):
         Returns:
             NarInfo if found, None otherwise
         """
-        # Strategy 1: Find providers via DHT
-        providers = await self.dht.find_path_providers(hsh)
+        # Strategy 1: Find providers via DHT (synchronous call)
+        providers = self.dht.find_path_providers(hsh)
         if providers:
             for provider in providers:
                 result = await self._query_peer_narinfo(provider, hsh)
@@ -160,8 +160,8 @@ class LibP2PStore(Store):
         # Find the peer
         peer = self._find_peer_by_id(peer_id_str)
         if peer is None:
-            # Try to find via DHT
-            providers = await self.dht.find_path_providers(hsh)
+            # Try to find via DHT (synchronous call)
+            providers = self.dht.find_path_providers(hsh)
             for p in providers:
                 if str(p.peer_id) == peer_id_str:
                     peer = p

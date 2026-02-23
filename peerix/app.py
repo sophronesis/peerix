@@ -372,21 +372,7 @@ async def pull_wan_nar(req: Request) -> Response:
         return Response(content="Gone", status_code=404)
 
 
-# LibP2P remote NARs
-@app.route("/v4/libp2p/{path:path}")
-async def pull_libp2p_nar(req: Request) -> Response:
-    if p2p_access is None:
-        return Response(content="LibP2P mode not enabled", status_code=404)
-    try:
-        return StreamingResponse(
-            await p2p_access["access"].nar(f"v4/libp2p/{req.path_params['path']}"),
-            media_type="text/plain",
-        )
-    except FileNotFoundError:
-        return Response(content="Gone", status_code=404)
-
-
-# LibP2P status endpoint
+# LibP2P status endpoint (must be before the catch-all path route)
 @app.route("/v4/libp2p/status")
 async def libp2p_status(req: Request) -> Response:
     if p2p_access is None:
@@ -407,3 +393,17 @@ async def libp2p_status(req: Request) -> Response:
     import json
     return Response(content=json.dumps(status), status_code=200,
                    media_type="application/json")
+
+
+# LibP2P remote NARs
+@app.route("/v4/libp2p/{path:path}")
+async def pull_libp2p_nar(req: Request) -> Response:
+    if p2p_access is None:
+        return Response(content="LibP2P mode not enabled", status_code=404)
+    try:
+        return StreamingResponse(
+            await p2p_access["access"].nar(f"v4/libp2p/{req.path_params['path']}"),
+            media_type="text/plain",
+        )
+    except FileNotFoundError:
+        return Response(content="Gone", status_code=404)

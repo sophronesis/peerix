@@ -92,6 +92,7 @@ class LibP2PHost:
         self._protocol_handlers: t.Dict[TProtocol, t.Callable] = {}
         self._nat_status: str = "unknown"  # "public", "private", "unknown"
         self._nursery: t.Optional[trio.Nursery] = None
+        self._host_context: t.Any = None  # host.run() context manager
 
     @property
     def peer_id(self) -> t.Optional[PeerID]:
@@ -126,8 +127,12 @@ class LibP2PHost:
             return f"/peerix/v1/network/{hashlib.sha256(self.config.network_id.encode()).hexdigest()}"
         return "/peerix/v1/network/default"
 
-    async def start(self) -> None:
-        """Start the libp2p host and all services."""
+    async def start(self, nursery: t.Optional[trio.Nursery] = None) -> None:
+        """Start the libp2p host and all services.
+
+        If nursery is provided, the host will be run in that nursery.
+        Otherwise, this method will start an internal nursery.
+        """
         if self._is_running:
             return
 
@@ -149,7 +154,6 @@ class LibP2PHost:
         # Create the host with built-in mDNS and bootstrap support
         self._host = new_host(
             key_pair=self._key_pair,
-            listen_addrs=listen_maddrs,
             enable_mDNS=self.config.enable_mdns,
             bootstrap=self.config.bootstrap_peers if self.config.bootstrap_peers else None,
         )
@@ -158,12 +162,19 @@ class LibP2PHost:
         for protocol, handler in self._protocol_handlers.items():
             self._host.set_stream_handler(protocol, handler)
 
+        logger.info(f"LibP2P host created with peer ID: {self.peer_id}")
+
+        # Start the host's network layer using run() context manager
+        # This needs to stay open for the lifetime of the host
+        self._host_context = self._host.run(listen_maddrs)
+        await self._host_context.__aenter__()
+
         logger.info(f"LibP2P host started with peer ID: {self.peer_id}")
         logger.info(f"Listening on: {self.addrs}")
 
         # Start DHT if enabled
         if self.config.enable_dht:
-            await self._start_dht()
+            self._start_dht()
 
         # Connect to relay servers
         if self.config.enable_relay and self.config.relay_servers:
@@ -184,6 +195,14 @@ class LibP2PHost:
         if self._mdns:
             self._mdns.stop()
             self._mdns = None
+
+        # Close the host context (exits run() context manager)
+        if self._host_context:
+            try:
+                await self._host_context.__aexit__(None, None, None)
+            except Exception as e:
+                logger.debug(f"Error closing host context: {e}")
+            self._host_context = None
 
         if self._host:
             await self._host.close()
@@ -216,7 +235,7 @@ class LibP2PHost:
         """Get list of discovered peers."""
         return list(self._discovered_peers.values())
 
-    async def _start_dht(self) -> None:
+    def _start_dht(self) -> None:
         """Start Kademlia DHT for global peer discovery."""
         logger.debug("Starting Kademlia DHT...")
         try:
@@ -237,35 +256,34 @@ class LibP2PHost:
             except Exception as e:
                 logger.warning(f"Failed to connect to relay server {addr_str}: {e}")
 
-    async def find_peer(self, peer_id: PeerID) -> t.Optional[PeerInfo]:
-        """Find a peer via DHT."""
+    def find_peer(self, peer_id: PeerID) -> t.Optional[PeerInfo]:
+        """Find a peer via DHT (synchronous)."""
         if self._dht is None:
             return None
         try:
-            return await self._dht.find_peer(peer_id)
+            return self._dht.find_peer(peer_id)
         except Exception as e:
             logger.debug(f"DHT find_peer failed for {peer_id}: {e}")
             return None
 
-    async def provide(self, key: str) -> None:
-        """Announce that we provide a key (for content routing)."""
+    def provide(self, key: str) -> bool:
+        """Announce that we provide a key (for content routing). Returns success."""
         if self._dht is None:
-            return
+            return False
         try:
-            await self._dht.provide(key.encode())
+            result = self._dht.provide(key)
             logger.debug(f"Announced as provider for: {key}")
+            return result
         except Exception as e:
             logger.debug(f"Failed to announce provider for {key}: {e}")
+            return False
 
-    async def find_providers(self, key: str, count: int = 20) -> t.List[PeerInfo]:
-        """Find providers for a key via DHT."""
+    def find_providers(self, key: str, count: int = 20) -> t.List[PeerInfo]:
+        """Find providers for a key via DHT (synchronous)."""
         if self._dht is None:
             return []
         try:
-            providers = []
-            async for provider in self._dht.find_providers(key.encode(), count):
-                providers.append(provider)
-            return providers
+            return self._dht.find_providers(key, count)
         except Exception as e:
             logger.debug(f"Failed to find providers for {key}: {e}")
             return []
