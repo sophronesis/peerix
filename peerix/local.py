@@ -2,6 +2,7 @@ import typing as t
 
 import contextlib
 import tempfile
+import subprocess
 import logging
 import shutil
 import base64
@@ -82,7 +83,7 @@ class LocalStore(Store):
         logger.info(f"Serving {path}")
         process = await trio.lowlevel.open_process(
             [nix, "dump-path", "--", path],
-            stdout=trio.PIPE,
+            stdout=subprocess.PIPE,
             stderr=None,
             stdin=None,
         )
