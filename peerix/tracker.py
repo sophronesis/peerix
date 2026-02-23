@@ -1,17 +1,15 @@
 import json
 import math
 import time
-import base64
 import sqlite3
-import asyncio
 import logging
+from contextlib import asynccontextmanager
+
+import trio
 
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 from starlette.applications import Starlette
-
-from peerix.net_validation import is_safe_peer_address
-from peerix.peer_identity import verify_request, derive_peer_id
 
 
 logger = logging.getLogger("peerix.tracker")
@@ -29,8 +27,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             peer_id TEXT PRIMARY KEY,
             addr TEXT NOT NULL,
             port INTEGER NOT NULL,
-            last_seen REAL NOT NULL,
-            public_key BLOB
+            last_seen REAL NOT NULL
         )
     """)
     conn.execute("""
@@ -55,11 +52,6 @@ def init_db(db_path: str) -> sqlite3.Connection:
             failed_transfers INTEGER DEFAULT 0
         )
     """)
-    # Migration: add public_key column if missing (upgrade from older schema)
-    try:
-        conn.execute("SELECT public_key FROM peers LIMIT 0")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE peers ADD COLUMN public_key BLOB")
     conn.commit()
     return conn
 
@@ -70,68 +62,27 @@ def compute_score(total_shared: int, successful: int, failed: int) -> float:
     return (successful / (successful + failed + 1)) * math.log(total_shared + 1)
 
 
-def _verify_tracker_auth(conn: sqlite3.Connection, body: dict, peer_id: str) -> JSONResponse:
-    """Verify signature auth for a tracker request.
-
-    Returns a JSONResponse error if auth fails, or None if auth passes.
-    Backward compatible: if no signature provided and no stored key, allows access.
-    """
-    signature = body.get("signature")
-    timestamp = body.get("timestamp")
-    public_key_b64 = body.get("public_key")
-
-    # Look up stored public key for this peer
-    row = conn.execute(
-        "SELECT public_key FROM peers WHERE peer_id = ?", (peer_id,)
-    ).fetchone()
-    stored_key = row[0] if row else None
-
-    # If request includes auth data, verify it
-    if signature and timestamp and public_key_b64:
-        try:
-            pub_bytes = base64.b64decode(public_key_b64)
-        except Exception:
-            return JSONResponse({"error": "invalid public_key encoding"}, status_code=400)
-
-        # Verify peer_id matches the public key
-        expected_id = derive_peer_id(pub_bytes)
-        if expected_id != peer_id:
-            return JSONResponse({"error": "public_key does not match peer_id"}, status_code=400)
-
-        # If we have a stored key, it must match
-        if stored_key is not None and stored_key != pub_bytes:
-            logger.warning(f"Impersonation attempt: {peer_id} with different key")
-            return JSONResponse({"error": "peer_id already registered with different key"}, status_code=403)
-
-        # Verify the signature
-        if not verify_request(pub_bytes, peer_id, str(timestamp), signature):
-            return JSONResponse({"error": "invalid signature"}, status_code=403)
-
-        return None  # Auth passed
-
-    # No auth data in request — check if peer has a stored key
-    if stored_key is not None:
-        # Peer previously registered with a key — require auth
-        return JSONResponse({"error": "signature required for authenticated peer"}, status_code=403)
-
-    # No stored key, no auth data — backward compatible unauthenticated access
-    return None
+async def cleanup_stale_peers(conn):
+    """Background task to clean up stale peers."""
+    while True:
+        await trio.sleep(CLEANUP_INTERVAL)
+        cutoff = time.time() - PEER_TTL
+        conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
+        conn.commit()
 
 
 def create_tracker_app(db_path: str) -> Starlette:
     conn = init_db(db_path)
-    app = Starlette()
 
-    async def cleanup_stale_peers():
-        while True:
-            await asyncio.sleep(CLEANUP_INTERVAL)
-            cutoff = time.time() - PEER_TTL
-            conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
-            conn.commit()
+    @asynccontextmanager
+    async def lifespan(app):
+        # Start cleanup task in background
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(cleanup_stale_peers, conn)
+            yield
+            nursery.cancel_scope.cancel()
 
-    @app.on_event("startup")
-    async def startup():
-        asyncio.create_task(cleanup_stale_peers())
+    app = Starlette(lifespan=lifespan)
 
     @app.route("/announce", methods=["POST"])
     async def announce(req: Request) -> Response:
@@ -141,55 +92,13 @@ def create_tracker_app(db_path: str) -> Starlette:
         if not peer_id or port is None:
             return JSONResponse({"error": "peer_id and port required"}, status_code=400)
 
-        addr = body.get("addr") or req.client.host
-
-        # Validate address
-        if not is_safe_peer_address(addr):
-            return JSONResponse({"error": f"invalid peer address: {addr}"}, status_code=400)
-
-        # Verify auth (if provided)
-        signature = body.get("signature")
-        timestamp = body.get("timestamp")
-        public_key_b64 = body.get("public_key")
-        pub_bytes = None
-
-        if signature and timestamp and public_key_b64:
-            try:
-                pub_bytes = base64.b64decode(public_key_b64)
-            except Exception:
-                return JSONResponse({"error": "invalid public_key encoding"}, status_code=400)
-
-            expected_id = derive_peer_id(pub_bytes)
-            if expected_id != peer_id:
-                return JSONResponse({"error": "public_key does not match peer_id"}, status_code=400)
-
-            # Check stored key
-            row = conn.execute(
-                "SELECT public_key FROM peers WHERE peer_id = ?", (peer_id,)
-            ).fetchone()
-            stored_key = row[0] if row else None
-
-            if stored_key is not None and stored_key != pub_bytes:
-                logger.warning(f"Impersonation attempt on announce: {peer_id}")
-                return JSONResponse({"error": "peer_id already registered with different key"}, status_code=403)
-
-            if not verify_request(pub_bytes, peer_id, str(timestamp), signature):
-                return JSONResponse({"error": "invalid signature"}, status_code=403)
-        else:
-            # No auth — check if peer already has a stored key
-            row = conn.execute(
-                "SELECT public_key FROM peers WHERE peer_id = ?", (peer_id,)
-            ).fetchone()
-            if row and row[0] is not None:
-                return JSONResponse({"error": "signature required for authenticated peer"}, status_code=403)
-
+        addr = req.client.host
         now = time.time()
 
         conn.execute(
-            "INSERT INTO peers (peer_id, addr, port, last_seen, public_key) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(peer_id) DO UPDATE SET addr=?, port=?, last_seen=?, "
-            "public_key=COALESCE(?, public_key)",
-            (peer_id, addr, port, now, pub_bytes, addr, port, now, pub_bytes)
+            "INSERT INTO peers (peer_id, addr, port, last_seen) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(peer_id) DO UPDATE SET addr=?, port=?, last_seen=?",
+            (peer_id, addr, port, now, addr, port, now)
         )
         conn.commit()
 
@@ -236,11 +145,6 @@ def create_tracker_app(db_path: str) -> Starlette:
         if not sender_id or not receiver_id:
             return JSONResponse({"error": "sender_id and receiver_id required"}, status_code=400)
 
-        # Auth check: if the receiver has a stored public key, require signature
-        auth_err = _verify_tracker_auth(conn, body, receiver_id)
-        if auth_err is not None:
-            return auth_err
-
         now = time.time()
         cur = conn.execute(
             "INSERT INTO transfers (sender_id, receiver_id, created_at) VALUES (?, ?, ?)",
@@ -265,11 +169,6 @@ def create_tracker_app(db_path: str) -> Starlette:
 
         if role not in ("sender", "receiver"):
             return JSONResponse({"error": "role must be 'sender' or 'receiver'"}, status_code=400)
-
-        # Auth check: if the reporting peer has a stored public key, require signature
-        auth_err = _verify_tracker_auth(conn, body, peer_id)
-        if auth_err is not None:
-            return auth_err
 
         row = conn.execute(
             "SELECT sender_id, receiver_id, sender_bytes, receiver_bytes, "

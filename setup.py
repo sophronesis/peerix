@@ -20,5 +20,5 @@ setup(
         ]
     },
     version=version,
-    requires=requirements
+    install_requires=requirements
 )

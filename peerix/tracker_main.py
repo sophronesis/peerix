@@ -1,10 +1,9 @@
 import logging
-import asyncio
 import argparse
 
-import uvloop
+import trio
 from hypercorn import Config
-from hypercorn.asyncio import serve
+from hypercorn.trio import serve
 
 from peerix.tracker import create_tracker_app
 
@@ -19,10 +18,9 @@ parser.add_argument("--db-path", default="./peerix-tracker.db")
 def run():
     args = parser.parse_args()
     logging.basicConfig(level=args.loglevel)
-    uvloop.install()
 
     app = create_tracker_app(args.db_path)
-    asyncio.run(main(app, args.host, args.port))
+    trio.run(main, app, args.host, args.port)
 
 
 async def main(app, host: str, port: int):

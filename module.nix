@@ -70,24 +70,28 @@ in
         '';
       };
 
-      port = lib.mkOption {
-        type = types.int;
-        default = 12304;
-        description = "Port for the peerix HTTP server and peer announcements.";
-      };
-
       package = mkOption {
         type = types.package;
-        default = pkgs.peerix;
-        defaultText = literalExpression "pkgs.peerix";
-        description = "The package to use for peerix";
+        default = if cfg.mode == "libp2p" || cfg.mode == "hybrid"
+                  then pkgs.peerix-full
+                  else pkgs.peerix;
+        defaultText = literalExpression "pkgs.peerix or pkgs.peerix-full";
+        description = ''
+          The package to use for peerix.
+          Defaults to peerix-full for libp2p/hybrid modes, peerix for others.
+        '';
       };
 
       mode = lib.mkOption {
-        type = types.enum [ "lan" "wan" "both" ];
+        type = types.enum [ "lan" "wan" "both" "libp2p" "hybrid" ];
         default = "lan";
         description = ''
-          Discovery mode: lan (UDP broadcast), wan (tracker-based), or both.
+          Discovery mode:
+          - lan: UDP broadcast for local network discovery
+          - wan: HTTP tracker-based discovery
+          - both: lan + wan combined
+          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching)
+          - hybrid: libp2p + tracker for maximum compatibility
         '';
       };
 
@@ -95,7 +99,7 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          URL of the peerix tracker server. Required for wan and both modes.
+          URL of the peerix tracker server. Required for wan, both, and hybrid modes.
         '';
       };
 
@@ -139,15 +143,6 @@ in
         '';
       };
 
-      announceAddr = lib.mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = ''
-          Address to announce to the tracker. Overrides the auto-detected IP.
-          Useful for NAT/port-forwarding setups (e.g. QEMU user-net).
-        '';
-      };
-
       peerId = lib.mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -156,21 +151,54 @@ in
         '';
       };
 
-      sshPublicKeyFile = lib.mkOption {
-        type = types.nullOr types.path;
-        default = null;
+      # LibP2P options
+      bootstrapPeers = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmPeerID" ];
         description = ''
-          Path to SSH ed25519 public key for peer identity.
-          Defaults to /etc/ssh/ssh_host_ed25519_key.pub if sshPrivateKeyFile is set.
+          LibP2P bootstrap peer multiaddrs for DHT initialization.
+          Required for libp2p mode to discover peers outside local network.
         '';
       };
 
-      sshPrivateKeyFile = lib.mkOption {
-        type = types.nullOr types.path;
-        default = null;
+      relayServers = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/1.2.3.4/tcp/12304/p2p/QmRelayID" ];
         description = ''
-          Path to SSH ed25519 private key for request signing.
-          When set, enables per-peer cryptographic authentication.
+          LibP2P relay server multiaddrs for NAT traversal fallback.
+          Used when direct connections fail due to NAT.
+        '';
+      };
+
+      networkId = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "my-private-network";
+        description = ''
+          Network identifier for DHT peer discovery.
+          Peers with the same network ID will discover each other.
+          If null, uses default public network or derives from tracker URL.
+        '';
+      };
+
+      listenAddrs = lib.mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = [ "/ip4/0.0.0.0/tcp/12304" ];
+        description = ''
+          LibP2P listen multiaddrs. If empty, defaults to TCP on the peerix port.
+          Note: py-libp2p 0.6.0 only supports TCP, not QUIC.
+        '';
+      };
+
+      enableIpfsCompat = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable IPFS compatibility layer.
+          Announces NARs to IPFS DHT for discoverability by IPFS clients.
         '';
       };
 
@@ -216,16 +244,16 @@ in
           PrivateIPC = true;
           PrivateUsers = true;
 
-          SystemCallFilter = [
-            "~@clock"
-            "~@debug"
-            "~@module"
-            "~@mount"
-            "~@raw-io"
-            "~@reboot"
-            "~@swap"
-            "~@obsolete"
-            "~@cpu-emulation"
+          SystemCallFilters = [
+            "@aio"
+            "@basic-io"
+            "@file-system"
+            "@io-event"
+            "@process"
+            "@network-io"
+            "@timer"
+            "@signal"
+            "@alarm"
           ];
           SystemCallErrorNumber = "EPERM";
 
@@ -249,14 +277,6 @@ in
             (lib.mkIf (cfg.privateKeyFile != null) [
               cfg.privateKeyFile
             ])
-
-            (lib.mkIf (cfg.sshPublicKeyFile != null) [
-              cfg.sshPublicKeyFile
-            ])
-
-            (lib.mkIf (cfg.sshPrivateKeyFile != null) [
-              cfg.sshPrivateKeyFile
-            ])
           ];
           ExecPaths = [
             "/nix/store"
@@ -266,26 +286,28 @@ in
           ];
         };
         script = let
-          esc = lib.escapeShellArg;
-          modeArgs = "--mode ${esc cfg.mode}";
-          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${esc cfg.trackerUrl}";
+          modeArgs = "--mode ${cfg.mode}";
+          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
           verifyArgs = lib.optionalString cfg.noVerify "--no-verify";
           upstreamArgs = lib.optionalString (cfg.upstreamCache != "https://cache.nixos.org")
-            "--upstream-cache ${esc cfg.upstreamCache}";
+            "--upstream-cache ${cfg.upstreamCache}";
           filterArgs = lib.optionalString cfg.noFilter "--no-filter";
           defaultFilterArgs = lib.optionalString cfg.noDefaultFilters "--no-default-filters";
           patternArgs = lib.optionalString (cfg.filterPatterns != [])
-            "--filter-patterns ${lib.concatMapStringsSep " " esc cfg.filterPatterns}";
-          portArgs = "--port ${toString cfg.port}";
-          announceAddrArgs = lib.optionalString (cfg.announceAddr != null) "--announce-addr ${esc cfg.announceAddr}";
-          peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${esc cfg.peerId}";
-          sshPubKeyArgs = lib.optionalString (cfg.sshPublicKeyFile != null)
-            "--ssh-public-key ${esc (toString cfg.sshPublicKeyFile)}";
-          sshPrivKeyArgs = lib.optionalString (cfg.sshPrivateKeyFile != null)
-            "--ssh-private-key ${esc (toString cfg.sshPrivateKeyFile)}";
+            "--filter-patterns ${lib.concatStringsSep " " cfg.filterPatterns}";
+          peerIdArgs = lib.optionalString (cfg.peerId != null) "--peer-id ${cfg.peerId}";
+          # LibP2P args
+          bootstrapArgs = lib.optionalString (cfg.bootstrapPeers != [])
+            "--bootstrap-peers ${lib.concatStringsSep " " cfg.bootstrapPeers}";
+          relayArgs = lib.optionalString (cfg.relayServers != [])
+            "--relay-servers ${lib.concatStringsSep " " cfg.relayServers}";
+          networkIdArgs = lib.optionalString (cfg.networkId != null)
+            "--network-id ${cfg.networkId}";
+          listenAddrsArgs = lib.optionalString (cfg.listenAddrs != [])
+            "--listen-addrs ${lib.concatStringsSep " " cfg.listenAddrs}";
+          ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
         in ''
           exec ${cfg.package}/bin/peerix \
-            ${portArgs} \
             ${modeArgs} \
             ${trackerArgs} \
             ${verifyArgs} \
@@ -293,17 +315,19 @@ in
             ${filterArgs} \
             ${defaultFilterArgs} \
             ${patternArgs} \
-            ${announceAddrArgs} \
             ${peerIdArgs} \
-            ${sshPubKeyArgs} \
-            ${sshPrivKeyArgs}
+            ${bootstrapArgs} \
+            ${relayArgs} \
+            ${networkIdArgs} \
+            ${listenAddrsArgs} \
+            ${ipfsCompatArgs}
         '';
       };
 
       nix = {
         settings = {
           substituters = [
-            "http://127.0.0.1:${toString cfg.port}/"
+            "http://127.0.0.1:12304/"
           ];
           trusted-public-keys = [
             (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
@@ -317,8 +341,9 @@ in
       };
 
       networking.firewall = lib.mkIf (cfg.openFirewall) {
-        allowedTCPPorts = [ cfg.port ];
-        allowedUDPPorts = [ cfg.port ];
+        # HTTP on 12304, libp2p on 13304 (port + 1000)
+        allowedTCPPorts = [ 12304 13304 ];
+        allowedUDPPorts = [ 12304 ];
       };
     })
 
@@ -348,12 +373,10 @@ in
           ReadWritePaths = [ (builtins.dirOf tcfg.dbPath) ];
           ExecPaths = [ "/nix/store" ];
         };
-        script = let
-          esc = lib.escapeShellArg;
-        in ''
+        script = ''
           exec ${cfg.package}/bin/peerix-tracker \
             --port ${toString tcfg.port} \
-            --db-path ${esc tcfg.dbPath}
+            --db-path ${tcfg.dbPath}
         '';
       };
 

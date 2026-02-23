@@ -1,16 +1,16 @@
 import typing as t
 
 import contextlib
-import subprocess
 import tempfile
+import subprocess
 import logging
-import asyncio
 import shutil
 import base64
 import sys
 import os
 
-import aiohttp
+import trio
+import httpx
 
 from peerix.store import NarInfo, CacheInfo, Store
 
@@ -32,50 +32,46 @@ logger = logging.getLogger("peerix.local")
 
 class LocalStore(Store):
 
-    def __init__(self, session: aiohttp.ClientSession):
-        self.session = session
+    def __init__(self, client: httpx.AsyncClient):
+        self.client = client
         self._cache: t.Optional[CacheInfo] = None
 
     async def cache_info(self) -> CacheInfo:
         if self._cache is None:
-            async with self.session.get("http://_/nix-cache-info") as resp:
-                storeDir = ""
-                wantMassQuery = -1
-                priority = 50
+            resp = await self.client.get("http://localhost/nix-cache-info")
+            storeDir = ""
+            wantMassQuery = -1
+            priority = 50
 
-                for line in (await resp.text()).splitlines():
-                    k, v = line.split(":", 1)
-                    v = v.strip()
-                    k = k.strip()
+            for line in resp.text.splitlines():
+                k, v = line.split(":", 1)
+                v = v.strip()
+                k = k.strip()
 
-                    if k == "StoreDir":
-                        storeDir = v
-                    elif k == "WantMassQuery":
-                        wantMassQuery = int(v)
-                    elif k == "Priority":
-                        priority = int(v)
+                if k == "StoreDir":
+                    storeDir = v
+                elif k == "WantMassQuery":
+                    wantMassQuery = int(v)
+                elif k == "Priority":
+                    priority = int(v)
 
-                if not storeDir.startswith("/"):
-                    storeDir = "/nix/store"
-                self._cache = CacheInfo(storeDir, wantMassQuery, priority)
+            self._cache = CacheInfo(storeDir, wantMassQuery, priority)
 
         return self._cache
 
 
     async def narinfo(self, hsh: str) -> t.Optional[NarInfo]:
-        async with self.session.get(f"http://_/{hsh}.narinfo") as resp:
-            if resp.status == 404:
-                return None
-            info = NarInfo.parse(await resp.text())
+        resp = await self.client.get(f"http://localhost/{hsh}.narinfo")
+        if resp.status_code == 404:
+            return None
+        info = NarInfo.parse(resp.text)
         return info._replace(url=base64.b64encode(info.storePath.encode("utf-8")).replace(b"/", b"_").decode("ascii")+".nar")
 
     async def nar(self, sp: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
         if sp.endswith(".nar"):
             sp = sp[:-4]
         path = base64.b64decode(sp.replace("_", "/")).decode("utf-8")
-        path = os.path.realpath(path)
-        store_dir = (await self.cache_info()).storeDir
-        if not path.startswith(store_dir + "/"):
+        if not path.startswith((await self.cache_info()).storeDir):
             raise FileNotFoundError()
 
         if not os.path.exists(path):
@@ -85,23 +81,22 @@ class LocalStore(Store):
 
     async def _nar_pull(self, path: str) -> t.AsyncIterable[bytes]:
         logger.info(f"Serving {path}")
-        nix_store = shutil.which("nix-store")
-        process = await asyncio.create_subprocess_exec(
-                nix_store, "--dump", path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
+        process = await trio.lowlevel.open_process(
+            [nix, "dump-path", "--", path],
+            stdout=subprocess.PIPE,
+            stderr=None,
+            stdin=None,
+        )
 
         assert process.stdout is not None
-        while not process.stdout.at_eof():
-            yield await process.stdout.read(10*1024*1024)
+        try:
+            async for chunk in process.stdout:
+                yield chunk
+        finally:
+            process.terminate()
+            await process.wait()
 
         logger.debug(f"Served {path}")
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
 
 
 @contextlib.asynccontextmanager
@@ -110,31 +105,30 @@ async def local():
         sock = f"{tmpdir}/server.sock"
 
         logger.info("Launching nix-serve.")
-        # Don't pass NIX_SECRET_KEY_FILE to nix-serve — signing is handled by peerix
-        nix_serve_env = {k: v for k, v in os.environ.items() if k != "NIX_SECRET_KEY_FILE"}
-        process = await asyncio.create_subprocess_exec(
-            nix_serve, "--listen", sock,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+        process = await trio.lowlevel.open_process(
+            [nix_serve, "--listen", sock],
+            stdin=None,
+            stdout=None,
             stderr=sys.stderr,
-            env=nix_serve_env,
         )
+
+        # Wait for socket to appear
         for _ in range(10):
             if os.path.exists(sock):
                 break
-            await asyncio.sleep(1)
+            await trio.sleep(1)
         else:
             raise RuntimeError("Failed to start up local store.")
 
         try:
-            connector = aiohttp.UnixConnector(sock)
-            async with aiohttp.ClientSession(connector_owner=True, connector=connector) as session:
-                yield LocalStore(session)
+            transport = httpx.AsyncHTTPTransport(uds=sock)
+            async with httpx.AsyncClient(transport=transport) as client:
+                yield LocalStore(client)
         finally:
             try:
                 process.terminate()
             except ProcessLookupError:
                 pass
 
+            await process.wait()
             logger.info("nix-serve exited.")
-

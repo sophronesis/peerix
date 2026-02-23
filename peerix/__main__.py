@@ -1,11 +1,10 @@
 import os
 import logging
-import asyncio
 import argparse
 
-import uvloop
+import trio
 from hypercorn import Config
-from hypercorn.asyncio import serve
+from hypercorn.trio import serve
 
 from peerix.app import app, setup_stores
 
@@ -17,22 +16,27 @@ parser.add_argument("--private-key", required=False)
 parser.add_argument("--timeout", type=int, default=50)
 
 # Mode selection
-parser.add_argument("--mode", choices=["lan", "wan", "both"], default="lan",
-                    help="Discovery mode: lan (UDP broadcast), wan (tracker-based), or both")
+parser.add_argument("--mode", choices=["lan", "wan", "both", "libp2p", "hybrid"], default="lan",
+                    help="Discovery mode: lan (UDP broadcast), wan (tracker-based), "
+                         "libp2p (P2P with NAT traversal), hybrid (libp2p + tracker), or both (lan + wan)")
 
 # WAN options
 parser.add_argument("--tracker-url", default=None,
-                    help="URL of the peerix tracker (required for wan/both modes)")
+                    help="URL of the peerix tracker (required for wan/both/hybrid modes)")
 parser.add_argument("--peer-id", default=None,
                     help="Unique peer ID (auto-generated if not set)")
-parser.add_argument("--announce-addr", default=None,
-                    help="Address to announce to the tracker (overrides auto-detected IP)")
 
-# SSH key authentication
-parser.add_argument("--ssh-public-key", nargs="?", const="auto", default=None,
-                    help="Path to SSH ed25519 public key for peer identity (omit path for auto-detect)")
-parser.add_argument("--ssh-private-key", default=None,
-                    help="Path to SSH ed25519 private key for request signing")
+# LibP2P options
+parser.add_argument("--bootstrap-peers", nargs="*", default=None,
+                    help="LibP2P bootstrap peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/12304/p2p/QmPeerID)")
+parser.add_argument("--relay-servers", nargs="*", default=None,
+                    help="LibP2P relay server multiaddrs for NAT traversal fallback")
+parser.add_argument("--network-id", default=None,
+                    help="Network identifier for DHT peer discovery (peers with same ID discover each other)")
+parser.add_argument("--listen-addrs", nargs="*", default=None,
+                    help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT)")
+parser.add_argument("--enable-ipfs-compat", action="store_true",
+                    help="Enable IPFS compatibility layer (announce NARs to IPFS DHT)")
 
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
@@ -54,45 +58,19 @@ def run():
     if args.private_key is not None:
         os.environ["NIX_SECRET_KEY_FILE"] = os.path.abspath(os.path.expanduser(args.private_key))
 
+    # Validate mode requirements
     if args.mode in ("wan", "both") and not args.tracker_url:
         parser.error("--tracker-url is required for wan and both modes")
 
+    if args.mode == "hybrid" and not args.tracker_url and not args.bootstrap_peers:
+        parser.error("--tracker-url or --bootstrap-peers required for hybrid mode")
+
     logging.basicConfig(level=args.loglevel)
-    uvloop.install()
 
-    # Load SSH key identity if configured
-    identity = None
-    if args.ssh_public_key is not None:
-        from peerix.peer_identity import get_peer_id_from_ssh_key, load_signing_identity
-
-        pub_path = None if args.ssh_public_key == "auto" else args.ssh_public_key
-
-        if args.ssh_private_key is not None:
-            # Full signing identity
-            if pub_path is None:
-                # Auto-detect public key from private key path
-                pub_path = args.ssh_private_key + ".pub"
-                if not os.path.exists(pub_path):
-                    parser.error(f"Could not find public key at {pub_path}. "
-                                 f"Specify --ssh-public-key explicitly.")
-            identity = load_signing_identity(pub_path, args.ssh_private_key)
-            if args.peer_id is None:
-                args.peer_id = identity.peer_id
-            logging.info(f"SSH signing identity loaded, peer_id={identity.peer_id}")
-        else:
-            # Public key only — derive peer_id but no signing
-            peer_id = get_peer_id_from_ssh_key(pub_path)
-            if peer_id is not None:
-                if args.peer_id is None:
-                    args.peer_id = peer_id
-                logging.info(f"SSH peer_id derived: {peer_id}")
-            else:
-                logging.warning("Could not find or parse SSH ed25519 public key")
-
-    asyncio.run(main(args, identity))
+    trio.run(main, args)
 
 
-async def main(args, identity=None):
+async def main(args):
     config = Config()
     config.bind = [f"0.0.0.0:{args.port}"]
 
@@ -107,8 +85,12 @@ async def main(args, identity=None):
         filter_patterns=args.filter_patterns,
         no_default_filters=args.no_default_filters,
         peer_id=args.peer_id,
-        announce_addr=args.announce_addr,
-        identity=identity,
+        # LibP2P options
+        bootstrap_peers=args.bootstrap_peers,
+        relay_servers=args.relay_servers,
+        network_id=args.network_id,
+        listen_addrs=args.listen_addrs,
+        enable_ipfs_compat=args.enable_ipfs_compat,
     ):
         await serve(app, config)
 
