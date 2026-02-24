@@ -165,18 +165,18 @@ class IPFSStore(Store):
         """
         Check if content is available in IPFS network.
 
-        Uses findprovs with a short timeout to check availability.
+        Uses block/stat which is faster than findprovs and works even
+        when DHT routing is slow.
         """
         try:
             client = await self._get_client()
-            # Use a short timeout for availability check
+            # Try to get block stat - this will try to fetch if not local
             resp = await client.post(
-                f"{self.api_url}/dht/findprovs",
-                params={"arg": cid, "num-providers": "1"},
-                timeout=5.0,
+                f"{self.api_url}/block/stat",
+                params={"arg": cid},
+                timeout=10.0,
             )
-            # findprovs returns NDJSON, check if we got any provider
-            return resp.status_code == 200 and len(resp.content) > 0
+            return resp.status_code == 200
         except Exception:
             return False
 
@@ -204,21 +204,19 @@ class IPFSStore(Store):
             except Exception as e:
                 logger.debug(f"Tracker CID lookup failed for {hsh}: {e}")
 
-        # If we have a CID, try to fetch from IPFS
+        # If we have a CID, use IPFS URL (trust the tracker/cache)
+        # NAR fetch will fail gracefully if content isn't available
         if cid:
-            # Check if content is available (with short timeout)
-            if await self.check_ipfs_has(cid):
-                # We need narinfo metadata - try local or construct minimal one
-                ni = await self.local_store.narinfo(hsh)
-                if ni:
-                    # Rewrite URL to use IPFS
-                    ipfs_url = f"ipfs/{cid}"
-                    logger.info(f"Found {hsh} in IPFS: {cid}")
-                    return ni._replace(url=ipfs_url)
-                else:
-                    # We know the CID but don't have narinfo
-                    # For now, skip - could construct minimal narinfo
-                    logger.debug(f"Have CID but no narinfo for {hsh}")
+            # We need narinfo metadata from local store
+            ni = await self.local_store.narinfo(hsh)
+            if ni:
+                # Rewrite URL to use IPFS
+                ipfs_url = f"ipfs/{cid}"
+                logger.info(f"Found {hsh} in IPFS: {cid}")
+                return ni._replace(url=ipfs_url)
+            else:
+                # We know the CID but don't have narinfo locally
+                logger.debug(f"Have CID but no narinfo for {hsh}")
 
         # Fall back to local store
         return await self.local_store.narinfo(hsh)
