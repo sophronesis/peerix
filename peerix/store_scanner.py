@@ -67,36 +67,25 @@ def scan_store_paths(limit: int = 1000, skip_derivations: bool = True) -> t.List
     hashes = []
 
     try:
-        # Use nix path-info --all to list all store paths
-        result = subprocess.run(
-            ["nix", "path-info", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=60,  # Increased timeout for large stores
-        )
-
-        if result.returncode != 0:
-            logger.warning(f"nix path-info failed: {result.stderr}")
-            return _cached_hashes if _cached_hashes else []
-
-        for line in result.stdout.strip().split("\n"):
-            path = line.strip()
-            if not path:
+        # Fast path: directly list /nix/store directory
+        # This is much faster than nix path-info --all for large stores
+        store_path = "/nix/store"
+        for entry in os.scandir(store_path):
+            name = entry.name
+            # Skip derivation files
+            if skip_derivations and name.endswith(".drv"):
                 continue
-            # Skip derivation files - they're build recipes, not actual outputs
-            if skip_derivations and path.endswith(".drv"):
-                continue
-            h = get_store_path_hash(path)
-            if h:
-                hashes.append(h)
+            # Extract 32-char hash from name
+            if len(name) >= 32:
+                hashes.append(name[:32])
                 if limit > 0 and len(hashes) >= limit:
                     break
 
-    except subprocess.TimeoutExpired:
-        logger.warning("nix path-info timed out")
+    except PermissionError:
+        logger.warning("Permission denied reading /nix/store")
         return _cached_hashes if _cached_hashes else []
     except FileNotFoundError:
-        logger.warning("nix command not found")
+        logger.warning("/nix/store not found")
         return []
     except Exception as e:
         logger.warning(f"Store scan failed: {e}")
