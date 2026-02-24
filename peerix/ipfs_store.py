@@ -169,6 +169,7 @@ class IPFSStore(Store):
         Check if content is available in IPFS network.
 
         Uses routing/findprovs (the new API, replacing deprecated dht/findprovs).
+        The response is NDJSON with Type=4 indicating provider found.
         """
         try:
             client = await self._get_client()
@@ -180,10 +181,22 @@ class IPFSStore(Store):
             )
             if resp.status_code != 200:
                 return False
-            # Check if we got any providers in the response
-            data = resp.json()
-            responses = data.get("Responses", [])
-            return len(responses) > 0
+            # Response is NDJSON - check for Type=4 (provider found)
+            # or any entry with non-null Responses
+            for line in resp.text.strip().split('\n'):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    # Type 4 = provider found, or check Responses
+                    if data.get("Type") == 4:
+                        return True
+                    responses = data.get("Responses")
+                    if responses and len(responses) > 0:
+                        return True
+                except json.JSONDecodeError:
+                    continue
+            return False
         except Exception:
             return False
 
