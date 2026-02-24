@@ -326,9 +326,10 @@ services.kubo.enable = true;
 | Option | CLI | Default | Description |
 |--------|-----|---------|-------------|
 | `scanInterval` | `--scan-interval` | `3600` | Seconds between store scans (0 to disable) |
-| `scanLimit` | `--scan-limit` | `500` | Max store paths per scan |
 
-- CID cache is stored at `/var/lib/peerix/cid_cache.json`
+- Scans **all** store paths (no limit), filters sensitive packages, publishes to IPFS
+- CID mappings synced to tracker after each scan
+- CID cache stored at `/var/lib/peerix/cid_cache.json`
 - IPFS API defaults to `http://127.0.0.1:5001/api/v0`
 - NAR URLs use `ipfs/{cid}` format when fetched via IPFS
 - Filtering uses same patterns as WAN mode (system configs, secrets, etc.)

@@ -51,8 +51,6 @@ parser.add_argument("--enable-ipfs-compat", action="store_true",
 # IPFS scan options
 parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
-parser.add_argument("--scan-limit", type=int, default=500,
-                    help="Maximum store paths to process per scan (default: 500)")
 
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
@@ -135,7 +133,6 @@ async def main(args):
         enable_ipfs_compat=args.enable_ipfs_compat,
         # IPFS scan options
         scan_interval=args.scan_interval,
-        scan_limit=args.scan_limit,
     ):
         await serve(app, config)
 

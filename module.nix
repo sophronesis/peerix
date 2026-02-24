@@ -228,18 +228,10 @@ in
         default = 3600;
         description = ''
           Interval in seconds for periodic nix store scanning.
-          Scans local store and publishes applicable packages to IPFS.
+          Scans all store paths (after filtering), publishes to IPFS,
+          and syncs CID mappings to tracker.
           Set to 0 to disable periodic scanning.
           Default: 3600 (1 hour).
-        '';
-      };
-
-      scanLimit = lib.mkOption {
-        type = types.int;
-        default = 500;
-        description = ''
-          Maximum number of store paths to process per scan.
-          Default: 500.
         '';
       };
     };
@@ -354,7 +346,6 @@ in
           ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
           # IPFS scan args
           scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
-          scanLimitArgs = "--scan-limit ${toString cfg.scanLimit}";
           # Use Python directly with -m to avoid wrapper script access issues with PrivateUsers
           pythonEnv = pkgs.peerix-python;
           peerixPkg = pkgs.peerix-full-unwrapped;
@@ -377,8 +368,7 @@ in
             ${listenAddrsArgs} \
             ${identityFileArgs} \
             ${ipfsCompatArgs} \
-            ${scanIntervalArgs} \
-            ${scanLimitArgs}
+            ${scanIntervalArgs}
         '';
       };
 

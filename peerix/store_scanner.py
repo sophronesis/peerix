@@ -55,7 +55,7 @@ def scan_store_paths(limit: int = 1000) -> t.List[str]:
             h = get_store_path_hash(path)
             if h:
                 hashes.append(h)
-                if len(hashes) >= limit:
+                if limit > 0 and len(hashes) >= limit:
                     break
 
     except subprocess.TimeoutExpired:

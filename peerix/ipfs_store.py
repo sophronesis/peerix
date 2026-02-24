@@ -15,7 +15,7 @@ import httpx
 import trio
 
 from peerix.store import NarInfo, CacheInfo, Store
-from peerix.store_scanner import scan_recent_paths, get_store_path_hash
+from peerix.store_scanner import scan_store_paths, get_store_path_hash
 from peerix.filtered import DEFAULT_EXCLUDE_PATTERNS
 
 
@@ -387,23 +387,23 @@ class IPFSStore(Store):
 
     async def scan_and_publish(
         self,
-        limit: int = 500,
         extra_patterns: t.List[str] = None,
     ) -> t.Tuple[int, int]:
         """
         Scan local nix store and publish applicable packages to IPFS.
 
+        Scans all store paths (after filtering sensitive packages).
+
         Args:
-            limit: Maximum number of store paths to scan
             extra_patterns: Additional fnmatch patterns to exclude
 
         Returns:
             Tuple of (published_count, skipped_count)
         """
-        logger.info(f"Scanning nix store for IPFS publishing (limit={limit})...")
+        logger.info("Scanning nix store for IPFS publishing (all paths)...")
 
-        # Get recent store paths
-        store_hashes = scan_recent_paths(limit=limit)
+        # Get all store paths
+        store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
         published = 0
@@ -450,25 +450,26 @@ class IPFSStore(Store):
     async def run_periodic_scan(
         self,
         interval: float = DEFAULT_SCAN_INTERVAL,
-        limit: int = 500,
         extra_patterns: t.List[str] = None,
     ) -> None:
         """
         Run periodic store scanning in background.
 
+        Scans all store paths (no limit), filters sensitive packages,
+        publishes to IPFS, and syncs CID mappings to tracker.
+
         Args:
             interval: Seconds between scans (default: 3600 = 1 hour)
-            limit: Maximum store paths per scan
             extra_patterns: Additional exclusion patterns
         """
-        logger.info(f"Starting periodic IPFS store scan (interval={interval}s)")
+        logger.info(f"Starting periodic IPFS store scan (interval={interval}s, no limit)")
 
         while True:
             try:
-                published, skipped = await self.scan_and_publish(limit, extra_patterns)
+                published, skipped = await self.scan_and_publish(extra_patterns)
 
-                # Sync new mappings to tracker
-                if published > 0 and self.tracker_client is not None:
+                # Always sync all mappings to tracker after scan
+                if self.tracker_client is not None:
                     await self.sync_cid_mappings_to_tracker()
 
             except Exception as e:

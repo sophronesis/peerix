@@ -50,7 +50,6 @@ async def setup_stores(
     enable_ipfs_compat: bool = False,
     # IPFS scan options
     scan_interval: int = 3600,
-    scan_limit: int = 500,
 ):
     global l_access, r_access, w_access, p2p_access, ipfs_access
     w_access = None
@@ -147,7 +146,7 @@ async def setup_stores(
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
                 no_filter, filter_patterns, no_default_filters, peer_id,
-                scan_interval, scan_limit,
+                scan_interval,
             )
             ipfs_access = ipfs_info
             try:
@@ -158,7 +157,6 @@ async def setup_stores(
                         nursery.start_soon(
                             ipfs_info["store"].run_periodic_scan,
                             scan_interval,
-                            scan_limit,
                             filter_patterns,
                         )
                         yield
@@ -172,7 +170,7 @@ async def setup_stores(
 
 async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
                       no_filter, filter_patterns, no_default_filters, peer_id,
-                      scan_interval=3600, scan_limit=500):
+                      scan_interval=3600):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
     from peerix.store_scanner import scan_recent_paths
