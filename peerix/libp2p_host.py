@@ -140,6 +140,8 @@ class LibP2PConfig:
     enable_autonat: bool = True
     enable_hole_punching: bool = True
     private_key: t.Optional[bytes] = None
+    # Path to identity key file (keeps peer ID stable across restarts)
+    identity_file: t.Optional[str] = "/var/lib/peerix/identity.key"
 
 
 class LibP2PHost:
@@ -159,6 +161,7 @@ class LibP2PHost:
         self._dht: t.Optional[KadDHT] = None
         self._mdns: t.Optional[MDNSDiscovery] = None
         self._key_pair: t.Optional[KeyPair] = None
+        self._identity: t.Any = None  # PeerIdentity from peer_identity module
         self._is_running = False
         self._discovered_peers: t.Dict[str, PeerInfo] = {}
         self._protocol_handlers: t.Dict[TProtocol, t.Callable] = {}
@@ -188,6 +191,11 @@ class LibP2PHost:
     def nat_status(self) -> str:
         return self._nat_status
 
+    @property
+    def identity(self) -> t.Any:
+        """Get the persistent identity (PeerIdentity) if available."""
+        return self._identity
+
     def get_network_key(self) -> str:
         """
         Get the DHT key for our network.
@@ -213,12 +221,20 @@ class LibP2PHost:
 
         logger.info("Starting LibP2P host...")
 
-        # Generate or load key pair
-        if self.config.private_key:
-            # TODO: Deserialize from bytes
+        # Load or generate persistent identity
+        from peerix.peer_identity import get_or_create_identity, get_identity_seed
+        identity_path = self.config.identity_file or "/var/lib/peerix/identity.key"
+        try:
+            self._identity = get_or_create_identity(identity_path)
+            # Use identity seed to create deterministic libp2p key pair
+            seed = get_identity_seed(self._identity)
+            self._key_pair = create_new_key_pair(secret=seed)
+            logger.info(f"Using persistent identity from {identity_path}")
+        except Exception as e:
+            logger.warning(f"Could not load/create identity from {identity_path}: {e}")
+            logger.warning("Falling back to ephemeral key pair (peer ID will change on restart)")
             self._key_pair = create_new_key_pair()
-        else:
-            self._key_pair = create_new_key_pair()
+            self._identity = None
 
         # Parse listen addresses
         listen_maddrs = [Multiaddr(addr) for addr in self.config.listen_addrs]

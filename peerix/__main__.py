@@ -42,6 +42,8 @@ parser.add_argument("--network-id", default=None,
                     help="Network identifier for DHT peer discovery (peers with same ID discover each other)")
 parser.add_argument("--listen-addrs", nargs="*", default=None,
                     help="LibP2P listen multiaddrs (default: /ip4/0.0.0.0/tcp/PORT+1000)")
+parser.add_argument("--identity-file", default="/var/lib/peerix/identity.key",
+                    help="Path to persistent identity key file (keeps peer ID stable across restarts)")
 parser.add_argument("--enable-ipfs-compat", action="store_true",
                     help="Enable IPFS compatibility layer (announce NARs to IPFS DHT)")
 
@@ -122,6 +124,7 @@ async def main(args):
         relay_servers=args.relay_servers,
         network_id=args.network_id,
         listen_addrs=args.listen_addrs,
+        identity_file=args.identity_file,
         enable_ipfs_compat=args.enable_ipfs_compat,
     ):
         await serve(app, config)

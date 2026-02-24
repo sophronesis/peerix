@@ -202,6 +202,16 @@ in
         '';
       };
 
+      identityFile = lib.mkOption {
+        type = types.str;
+        default = "/var/lib/peerix/identity.key";
+        description = ''
+          Path to the persistent identity key file.
+          This keeps the peer ID stable across restarts.
+          The file contains a 32-byte ed25519 seed.
+        '';
+      };
+
       enableIpfsCompat = lib.mkOption {
         type = types.bool;
         default = false;
@@ -255,6 +265,10 @@ in
           User = cfg.user;
           Group = cfg.group;
 
+          # State directory for persistent identity key
+          StateDirectory = "peerix";
+          StateDirectoryMode = "0700";
+
           PrivateMounts = true;
           PrivateDevices = true;
           PrivateTmp = true;
@@ -264,7 +278,7 @@ in
           # SystemCallFilter disabled - trio/asyncio need various syscalls
           # that are hard to enumerate. Other protections still apply.
 
-          ProtectSystem = "full";
+          ProtectSystem = "strict";
           ProtectHome = true;
           ProtectHostname = true;
           ProtectClock = true;
@@ -285,6 +299,7 @@ in
               cfg.privateKeyFile
             ])
           ];
+          ReadWritePaths = [ "/var/lib/peerix" ];
           ExecPaths = [
             "/nix/store"
           ];
@@ -313,6 +328,7 @@ in
           networkIdArgs = "--network-id ${cfg.networkId}";
           listenAddrsArgs = lib.optionalString (cfg.listenAddrs != [])
             "--listen-addrs ${lib.concatStringsSep " " cfg.listenAddrs}";
+          identityFileArgs = "--identity-file ${cfg.identityFile}";
           ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
           # Use Python directly with -m to avoid wrapper script access issues with PrivateUsers
           pythonEnv = pkgs.peerix-python;
@@ -334,6 +350,7 @@ in
             ${relayArgs} \
             ${networkIdArgs} \
             ${listenAddrsArgs} \
+            ${identityFileArgs} \
             ${ipfsCompatArgs}
         '';
       };

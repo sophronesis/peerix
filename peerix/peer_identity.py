@@ -6,6 +6,7 @@ import time
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 try:
     from nacl.signing import SigningKey, VerifyKey
@@ -16,6 +17,9 @@ except ImportError:
 
 
 logger = logging.getLogger("peerix.peer_identity")
+
+# Default path for identity key (32-byte ed25519 seed)
+DEFAULT_IDENTITY_PATH = "/var/lib/peerix/identity.key"
 
 TIMESTAMP_WINDOW = 300  # 5 minutes
 
@@ -261,3 +265,94 @@ def verify_request(public_key_bytes: bytes, peer_id: str,
     except (BadSignatureError, Exception) as e:
         logger.debug(f"Signature verification failed: {e}")
         return False
+
+
+def generate_identity(path: str = DEFAULT_IDENTITY_PATH) -> PeerIdentity:
+    """Generate a new ed25519 identity and save to file.
+
+    Creates parent directories if needed. The file contains only the
+    32-byte seed, which can regenerate the full key pair.
+    """
+    if not HAS_NACL:
+        raise RuntimeError("pynacl is required for identity generation")
+
+    # Generate new key
+    signing_key = SigningKey.generate()
+    seed = bytes(signing_key)  # 32-byte seed
+
+    # Create parent directory
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save seed with restrictive permissions
+    with open(path, "wb") as f:
+        f.write(seed)
+    os.chmod(path, 0o600)
+
+    raw_pub = bytes(signing_key.verify_key)
+    peer_id = derive_peer_id(raw_pub)
+
+    logger.info(f"Generated new identity: peer_id={peer_id}, saved to {path}")
+    return PeerIdentity(
+        peer_id=peer_id,
+        public_key=raw_pub,
+        signing_key=signing_key,
+        public_key_b64=base64.b64encode(raw_pub).decode("ascii"),
+    )
+
+
+def load_identity(path: str = DEFAULT_IDENTITY_PATH) -> PeerIdentity:
+    """Load an existing identity from file.
+
+    The file should contain a 32-byte ed25519 seed.
+    """
+    if not HAS_NACL:
+        raise RuntimeError("pynacl is required for identity loading")
+
+    with open(path, "rb") as f:
+        seed = f.read()
+
+    if len(seed) != 32:
+        raise ValueError(f"Invalid identity file: expected 32 bytes, got {len(seed)}")
+
+    signing_key = SigningKey(seed)
+    raw_pub = bytes(signing_key.verify_key)
+    peer_id = derive_peer_id(raw_pub)
+
+    logger.info(f"Loaded identity: peer_id={peer_id} from {path}")
+    return PeerIdentity(
+        peer_id=peer_id,
+        public_key=raw_pub,
+        signing_key=signing_key,
+        public_key_b64=base64.b64encode(raw_pub).decode("ascii"),
+    )
+
+
+def get_or_create_identity(path: str = DEFAULT_IDENTITY_PATH) -> PeerIdentity:
+    """Load existing identity or generate a new one.
+
+    This is the main entry point for getting a stable identity.
+    """
+    if os.path.exists(path):
+        return load_identity(path)
+    else:
+        return generate_identity(path)
+
+
+def get_identity_seed(identity: PeerIdentity) -> bytes:
+    """Get the 32-byte seed from an identity for use with libp2p.
+
+    This seed can be used with libp2p's create_new_key_pair(secret=seed)
+    to create a deterministic libp2p identity.
+    """
+    return bytes(identity.signing_key)
+
+
+def create_signed_timestamp(identity: PeerIdentity) -> t.Tuple[str, str, str]:
+    """Create a signed timestamp for authentication.
+
+    Returns (peer_id, timestamp, signature) tuple.
+    """
+    timestamp = str(time.time())
+    signature = sign_request(identity, identity.peer_id, timestamp)
+    return (identity.peer_id, timestamp, signature)

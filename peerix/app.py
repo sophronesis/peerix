@@ -43,6 +43,7 @@ async def setup_stores(
     relay_servers: t.List[str] = None,
     network_id: str = None,
     listen_addrs: t.List[str] = None,
+    identity_file: str = "/var/lib/peerix/identity.key",
     enable_ipfs_compat: bool = False,
 ):
     global l_access, r_access, w_access, p2p_access
@@ -89,7 +90,7 @@ async def setup_stores(
                 l, local_port, no_verify, upstream_cache,
                 no_filter, filter_patterns, no_default_filters,
                 bootstrap_peers or [], relay_servers or [],
-                network_id, listen_addrs, enable_ipfs_compat,
+                network_id, listen_addrs, identity_file, enable_ipfs_compat,
             )
             try:
                 yield
@@ -107,7 +108,7 @@ async def setup_stores(
                     l, local_port, no_verify, upstream_cache,
                     no_filter, filter_patterns, no_default_filters,
                     bootstrap_peers or [], relay_servers or [],
-                    network_id, listen_addrs, enable_ipfs_compat,
+                    network_id, listen_addrs, identity_file, enable_ipfs_compat,
                 )
 
                 if tracker_url:
@@ -183,6 +184,7 @@ async def _setup_libp2p(
     relay_servers,
     network_id,
     listen_addrs,
+    identity_file,
     enable_ipfs_compat,
 ):
     """Setup libp2p-based peer discovery and NAR sharing."""
@@ -226,6 +228,7 @@ async def _setup_libp2p(
         enable_relay=len(relay_servers) > 0,
         enable_autonat=True,
         enable_hole_punching=True,
+        identity_file=identity_file,
     )
 
     host = LibP2PHost(config)
