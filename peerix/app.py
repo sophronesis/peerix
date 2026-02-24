@@ -3,6 +3,7 @@ import contextlib
 import uuid
 import typing as t
 
+import trio
 import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -15,6 +16,7 @@ from peerix.filtered import FilteredStore
 from peerix.verified import VerifiedStore
 from peerix.wan import TrackerStore
 from peerix.tracker_client import TrackerClient
+from peerix.store_scanner import scan_recent_paths
 
 
 logger = logging.getLogger("peerix.app")
@@ -103,7 +105,7 @@ async def setup_stores(
             async with remote(lp, local_port, "0.0.0.0", lp.prefix, timeout) as r:
                 r_access = PrefixStore("v2/remote", r)
 
-                # Setup both libp2p and tracker
+                # Setup libp2p first to get the peer ID
                 p2p_access = await _setup_libp2p(
                     l, local_port, no_verify, upstream_cache,
                     no_filter, filter_patterns, no_default_filters,
@@ -111,11 +113,21 @@ async def setup_stores(
                     network_id, listen_addrs, identity_file, enable_ipfs_compat,
                 )
 
+                # Get libp2p peer ID to register with tracker
+                libp2p_peer_id = None
+                if p2p_access and p2p_access.get("host"):
+                    libp2p_peer_id = str(p2p_access["host"].peer_id)
+
                 if tracker_url:
                     w_access = await _setup_wan(
                         l, local_port, tracker_url, no_verify, upstream_cache,
                         no_filter, filter_patterns, no_default_filters, peer_id,
+                        libp2p_peer_id=libp2p_peer_id,
                     )
+                    # Set tracker_client on libp2p_store for provider lookups
+                    if p2p_access and p2p_access.get("store"):
+                        p2p_access["store"].set_tracker_client(w_access["tracker_client"])
+                        p2p_access["tracker_client"] = w_access["tracker_client"]
 
                 try:
                     yield
@@ -127,7 +139,7 @@ async def setup_stores(
 
 async def _setup_wan(local_store, local_port, tracker_url, no_verify,
                      upstream_cache, no_filter, filter_patterns,
-                     no_default_filters, peer_id):
+                     no_default_filters, peer_id, libp2p_peer_id=None):
     if peer_id is None:
         peer_id = str(uuid.uuid4())
 
@@ -144,7 +156,15 @@ async def _setup_wan(local_store, local_port, tracker_url, no_verify,
             use_defaults=not no_default_filters,
         )
 
-    tracker_client = TrackerClient(tracker_url, peer_id, local_port)
+    tracker_client = TrackerClient(tracker_url, peer_id, local_port,
+                                   libp2p_peer_id=libp2p_peer_id)
+
+    # Scan and announce store paths
+    logger.info("Scanning local store paths for tracker announcement...")
+    store_hashes = scan_recent_paths(limit=500)
+    tracker_client.set_package_hashes(store_hashes)
+    logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
+
     await tracker_client.start_heartbeat()
 
     client = httpx.AsyncClient()

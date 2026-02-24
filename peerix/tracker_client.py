@@ -10,13 +10,16 @@ logger = logging.getLogger("peerix.tracker_client")
 
 class TrackerClient:
 
-    def __init__(self, tracker_url: str, peer_id: str, local_port: int):
+    def __init__(self, tracker_url: str, peer_id: str, local_port: int,
+                 libp2p_peer_id: t.Optional[str] = None):
         self.tracker_url = tracker_url.rstrip("/")
         self.peer_id = peer_id
         self.local_port = local_port
+        self.libp2p_peer_id = libp2p_peer_id
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cancel_scope: t.Optional[trio.CancelScope] = None
         self._nursery: t.Optional[trio.Nursery] = None
+        self._package_hashes: t.List[str] = []  # Store path hashes to announce
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -41,12 +44,22 @@ class TrackerClient:
                 logger.warning(f"Heartbeat announce failed: {e}")
             await trio.sleep(60)
 
+    def set_package_hashes(self, hashes: t.List[str]):
+        """Set the list of store path hashes to announce."""
+        self._package_hashes = hashes
+
     async def announce(self):
         client = await self._get_client()
-        resp = await client.post(f"{self.tracker_url}/announce", json={
+        payload = {
             "peer_id": self.peer_id,
             "port": self.local_port,
-        })
+        }
+        if self.libp2p_peer_id:
+            payload["libp2p_peer_id"] = self.libp2p_peer_id
+        if self._package_hashes:
+            payload["packages"] = self._package_hashes
+
+        resp = await client.post(f"{self.tracker_url}/announce", json=payload)
         if resp.status_code != 200:
             logger.warning(f"Announce failed: {resp.status_code}")
 
@@ -58,6 +71,16 @@ class TrackerClient:
         data = resp.json()
         # Filter out ourselves
         return [p for p in data.get("peers", []) if p["peer_id"] != self.peer_id]
+
+    async def find_providers(self, store_hash: str) -> t.List[t.Dict]:
+        """Find peers that have a specific store path hash."""
+        client = await self._get_client()
+        resp = await client.get(f"{self.tracker_url}/find/{store_hash}")
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        # Filter out ourselves
+        return [p for p in data.get("providers", []) if p["peer_id"] != self.peer_id]
 
     async def init_transfer(self, receiver_id: str) -> t.Optional[int]:
         client = await self._get_client()

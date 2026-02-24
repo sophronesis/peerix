@@ -27,6 +27,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
             peer_id TEXT PRIMARY KEY,
             addr TEXT NOT NULL,
             port INTEGER NOT NULL,
+            libp2p_peer_id TEXT,
             last_seen REAL NOT NULL
         )
     """)
@@ -52,6 +53,17 @@ def init_db(db_path: str) -> sqlite3.Connection:
             failed_transfers INTEGER DEFAULT 0
         )
     """)
+    # Package registry: which peer has which store path hashes
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS packages (
+            hash TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            last_seen REAL NOT NULL,
+            PRIMARY KEY (hash, peer_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_hash ON packages(hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_peer ON packages(peer_id)")
     conn.commit()
     return conn
 
@@ -63,11 +75,12 @@ def compute_score(total_shared: int, successful: int, failed: int) -> float:
 
 
 async def cleanup_stale_peers(conn):
-    """Background task to clean up stale peers."""
+    """Background task to clean up stale peers and packages."""
     while True:
         await trio.sleep(CLEANUP_INTERVAL)
         cutoff = time.time() - PEER_TTL
         conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
+        conn.execute("DELETE FROM packages WHERE last_seen < ?", (cutoff,))
         conn.commit()
 
 
@@ -94,15 +107,28 @@ def create_tracker_app(db_path: str) -> Starlette:
 
         addr = req.client.host
         now = time.time()
+        libp2p_peer_id = body.get("libp2p_peer_id")
+        packages = body.get("packages", [])
 
         conn.execute(
-            "INSERT INTO peers (peer_id, addr, port, last_seen) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(peer_id) DO UPDATE SET addr=?, port=?, last_seen=?",
-            (peer_id, addr, port, now, addr, port, now)
+            "INSERT INTO peers (peer_id, addr, port, libp2p_peer_id, last_seen) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(peer_id) DO UPDATE SET addr=?, port=?, libp2p_peer_id=?, last_seen=?",
+            (peer_id, addr, port, libp2p_peer_id, now, addr, port, libp2p_peer_id, now)
         )
+
+        # Update package registry
+        if packages:
+            # Clear old entries for this peer and insert new ones
+            conn.execute("DELETE FROM packages WHERE peer_id = ?", (peer_id,))
+            conn.executemany(
+                "INSERT INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
+                [(h, peer_id, now) for h in packages]
+            )
+
         conn.commit()
 
-        logger.info(f"Peer {peer_id} announced from {addr}:{port}")
+        pkg_count = len(packages) if packages else 0
+        logger.info(f"Peer {peer_id} announced from {addr}:{port} (libp2p={libp2p_peer_id}, pkgs={pkg_count})")
         return JSONResponse({"status": "ok"})
 
     @app.route("/peers", methods=["GET"])
@@ -236,6 +262,39 @@ def create_tracker_app(db_path: str) -> Starlette:
             return JSONResponse({"status": "resolved", "consistent": consistent})
 
         return JSONResponse({"status": "pending"})
+
+    @app.route("/find/{hash:str}", methods=["GET"])
+    async def find_providers(req: Request) -> Response:
+        """Find peers that have a specific store path hash."""
+        store_hash = req.path_params["hash"]
+        cutoff = time.time() - PEER_TTL
+
+        # Find peers that have this package and are still active
+        rows = conn.execute("""
+            SELECT p.peer_id, p.addr, p.port, p.libp2p_peer_id, p.last_seen,
+                   COALESCE(r.total_shared, 0), COALESCE(r.successful_transfers, 0),
+                   COALESCE(r.failed_transfers, 0)
+            FROM packages pkg
+            JOIN peers p ON pkg.peer_id = p.peer_id
+            LEFT JOIN reputation r ON p.peer_id = r.peer_id
+            WHERE pkg.hash = ? AND p.last_seen >= ?
+        """, (store_hash, cutoff)).fetchall()
+
+        providers = []
+        for row in rows:
+            score = compute_score(row[5], row[6], row[7])
+            providers.append({
+                "peer_id": row[0],
+                "addr": row[1],
+                "port": row[2],
+                "libp2p_peer_id": row[3],
+                "last_seen": row[4],
+                "score": round(score, 4),
+            })
+
+        # Sort by reputation score
+        providers.sort(key=lambda p: p["score"], reverse=True)
+        return JSONResponse({"hash": store_hash, "providers": providers})
 
     @app.route("/reputation/{peer_id:str}", methods=["GET"])
     async def get_reputation(req: Request) -> Response:

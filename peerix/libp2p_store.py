@@ -40,6 +40,7 @@ class LibP2PStore(Store):
         local_store: Store,
         host: "LibP2PHost",
         dht: "PeerixDHT",
+        tracker_client: t.Any = None,
         request_timeout: float = 30.0,
         nar_timeout: float = 300.0,
     ):
@@ -50,17 +51,24 @@ class LibP2PStore(Store):
             local_store: The underlying local store for cache_info
             host: The libp2p host for network operations
             dht: The DHT instance for peer discovery
+            tracker_client: Optional tracker client for provider discovery
             request_timeout: Timeout for narinfo requests (seconds)
             nar_timeout: Timeout for NAR transfers (seconds)
         """
         self.local_store = local_store
         self.host = host
         self.dht = dht
+        self.tracker_client = tracker_client
         self.request_timeout = request_timeout
         self.nar_timeout = nar_timeout
 
         # Track active transfers for metrics
         self._active_transfers: t.Dict[str, int] = {}
+
+    def set_tracker_client(self, tracker_client: t.Any) -> None:
+        """Set the tracker client for provider discovery."""
+        self.tracker_client = tracker_client
+        logger.info("LibP2PStore: tracker client configured for provider lookups")
 
     async def cache_info(self) -> CacheInfo:
         """Return local cache info."""
@@ -70,8 +78,10 @@ class LibP2PStore(Store):
         """
         Query narinfo from libp2p peers.
 
-        First tries to find providers for the specific store path,
-        then falls back to querying all discovered peers.
+        Discovery strategies (in order):
+        1. Query tracker for providers (if available)
+        2. Find providers via DHT
+        3. Query all connected peers
 
         Args:
             hsh: The store path hash to query
@@ -79,7 +89,28 @@ class LibP2PStore(Store):
         Returns:
             NarInfo if found, None otherwise
         """
-        # Strategy 1: Find providers via DHT
+        # Strategy 1: Find providers via tracker (most reliable for NAT'd peers)
+        if self.tracker_client is not None:
+            try:
+                tracker_providers = await self.tracker_client.find_providers(hsh)
+                logger.debug(f"Tracker returned {len(tracker_providers)} providers for {hsh}")
+                for tp in tracker_providers:
+                    libp2p_id = tp.get("libp2p_peer_id")
+                    if libp2p_id:
+                        # Try to find or connect to this peer
+                        peer = self._find_peer_by_id(libp2p_id)
+                        if peer:
+                            result = await self._query_peer_narinfo(peer, hsh)
+                            if result:
+                                logger.info(f"Found {hsh} via tracker -> {libp2p_id}")
+                                return result
+                        else:
+                            # Peer not connected, try to connect via bootstrap/relay
+                            logger.debug(f"Tracker found provider {libp2p_id} but not connected")
+            except Exception as e:
+                logger.debug(f"Tracker lookup failed for {hsh}: {e}")
+
+        # Strategy 2: Find providers via DHT
         providers = await self.dht.find_path_providers(hsh)
         if providers:
             for provider in providers:
@@ -87,7 +118,7 @@ class LibP2PStore(Store):
                 if result:
                     return result
 
-        # Strategy 2: Query all discovered peers
+        # Strategy 3: Query all discovered peers
         peers = self.host.get_peers()
         if not peers:
             logger.debug(f"No libp2p peers available for {hsh}")
