@@ -31,7 +31,7 @@ class TrackerClient:
             try:
                 await self.announce()
             except Exception as e:
-                logger.warning(f"Heartbeat announce failed: {e}")
+                logger.warning(f"Heartbeat announce failed: {type(e).__name__}: {e}")
             await trio.sleep(60)
 
     def set_package_hashes(self, hashes: t.List[str]):
@@ -49,7 +49,7 @@ class TrackerClient:
         if self._package_hashes:
             payload["packages"] = self._package_hashes
 
-        resp = await client.post(f"{self.tracker_url}/announce", json=payload)
+        resp = await client.post(f"{self.tracker_url}/announce", json=payload, timeout=30.0)
         if resp.status_code != 200:
             logger.warning(f"Announce failed: {resp.status_code}")
 
