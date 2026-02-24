@@ -433,6 +433,7 @@ async def libp2p_status(req: Request) -> Response:
         "peer_id": str(host.peer_id) if host else None,
         "addrs": [str(a) for a in host.addrs] if host else [],
         "nat_status": host.nat_status if host else "unknown",
+        "network_id": dht.config.network_id if dht else None,
         "peers": len(host.get_peers()) if host else 0,
         "discovered": list(dht.get_discovered_peers()) if dht else [],
     }
