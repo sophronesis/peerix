@@ -21,9 +21,10 @@ parser.add_argument("--private-key", required=False)
 parser.add_argument("--timeout", type=int, default=50)
 
 # Mode selection
-parser.add_argument("--mode", choices=["lan", "wan", "both", "libp2p", "hybrid"], default="lan",
+parser.add_argument("--mode", choices=["lan", "wan", "both", "libp2p", "hybrid", "ipfs"], default="lan",
                     help="Discovery mode: lan (UDP broadcast), wan (tracker-based), "
-                         "libp2p (P2P with NAT traversal), hybrid (libp2p + tracker), or both (lan + wan)")
+                         "libp2p (P2P with NAT traversal), hybrid (libp2p + tracker), "
+                         "ipfs (IPFS-based P2P), or both (lan + wan)")
 
 # WAN options
 parser.add_argument("--tracker-url", default=None,

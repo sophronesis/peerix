@@ -82,11 +82,12 @@ in
       };
 
       mode = lib.mkOption {
-        type = types.enum [ "lan" "wan" "both" "libp2p" "hybrid" ];
-        default = "libp2p";
+        type = types.enum [ "lan" "wan" "both" "libp2p" "hybrid" "ipfs" ];
+        default = "ipfs";
         description = ''
           Discovery mode:
-          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching) [default]
+          - ipfs: IPFS-based P2P (requires services.kubo.enable) [default]
+          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching)
           - lan: UDP broadcast for local network discovery
           - wan: HTTP tracker-based discovery
           - both: lan + wan combined

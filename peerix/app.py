@@ -26,6 +26,7 @@ l_access = None
 r_access = None
 w_access = None
 p2p_access = None  # LibP2P store access
+ipfs_access = None  # IPFS store access
 
 
 @contextlib.asynccontextmanager
@@ -48,9 +49,10 @@ async def setup_stores(
     identity_file: str = "/var/lib/peerix/identity.key",
     enable_ipfs_compat: bool = False,
 ):
-    global l_access, r_access, w_access, p2p_access
+    global l_access, r_access, w_access, p2p_access, ipfs_access
     w_access = None
     p2p_access = None
+    ipfs_access = None
 
     async with local() as l:
         l_access = PrefixStore("local/nar", l)
@@ -135,6 +137,65 @@ async def setup_stores(
                     await _cleanup_libp2p(p2p_access)
                     if w_access:
                         await _cleanup_wan(w_access)
+
+        elif mode == "ipfs":
+            # IPFS mode - uses IPFS for P2P NAR distribution
+            r_access = None
+            ipfs_info = await _setup_ipfs(l, no_verify, upstream_cache,
+                                          no_filter, filter_patterns, no_default_filters)
+            ipfs_access = ipfs_info
+            try:
+                yield
+            finally:
+                await _cleanup_ipfs(ipfs_info)
+                ipfs_access = None
+
+
+async def _setup_ipfs(local_store, no_verify, upstream_cache,
+                      no_filter, filter_patterns, no_default_filters):
+    """Setup IPFS-based NAR sharing."""
+    from peerix.ipfs_store import IPFSStore
+
+    # Build the serving chain: local → verified → filtered
+    serving_store = local_store
+    verified_store = None
+    if not no_verify:
+        verified_store = VerifiedStore(serving_store, upstream_cache)
+        serving_store = verified_store
+    if not no_filter:
+        serving_store = FilteredStore(
+            serving_store,
+            extra_patterns=filter_patterns or [],
+            use_defaults=not no_default_filters,
+        )
+
+    ipfs_store = IPFSStore(serving_store)
+    ipfs_access = PrefixStore("v5/ipfs", ipfs_store)
+
+    logger.info("IPFS store initialized")
+
+    return {
+        "access": ipfs_access,
+        "store": ipfs_store,
+        "verified_store": verified_store,
+        "serving_store": serving_store,
+    }
+
+
+async def _cleanup_ipfs(ipfs_info):
+    """Cleanup IPFS resources."""
+    if ipfs_info is None:
+        return
+
+    store = ipfs_info.get("store")
+    if store is not None:
+        await store.close()
+
+    vs = ipfs_info.get("verified_store")
+    if vs is not None:
+        await vs.close()
+
+    logger.info("IPFS store stopped")
 
 
 async def _setup_wan(local_store, local_port, tracker_url, no_verify,
@@ -350,6 +411,12 @@ async def narinfo(req: Request) -> Response:
         if ni is not None:
             return Response(content=ni.dump(), status_code=200, media_type="text/x-nix-narinfo")
 
+    # Try IPFS store
+    if ipfs_access is not None:
+        ni = await ipfs_access["access"].narinfo(hsh)
+        if ni is not None:
+            return Response(content=ni.dump(), status_code=200, media_type="text/x-nix-narinfo")
+
     return Response(content="Not found", status_code=404)
 
 
@@ -393,6 +460,20 @@ async def pull_wan_nar(req: Request) -> Response:
             await w_access["access"].nar(f"v3/wan/{req.path_params['path']}"),
             media_type="text/plain",
         )
+    except FileNotFoundError:
+        return Response(content="Gone", status_code=404)
+
+
+# IPFS NARs
+@app.route("/v5/ipfs/{path:path}")
+async def pull_ipfs_nar(req: Request) -> Response:
+    if ipfs_access is None:
+        return Response(content="IPFS mode not enabled", status_code=404)
+    try:
+        async def stream_nar():
+            async for chunk in ipfs_access["store"].nar(req.path_params['path']):
+                yield chunk
+        return StreamingResponse(stream_nar(), media_type="text/plain")
     except FileNotFoundError:
         return Response(content="Gone", status_code=404)
 
