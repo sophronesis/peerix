@@ -43,6 +43,9 @@
 
     in {
       packages = rec {
+        # Python environment with all dependencies (for running with -m)
+        peerix-python = python.withPackages (ps: allPackages);
+
         # Basic peerix without libp2p (smaller, fewer deps)
         peerix-unwrapped = python.pkgs.buildPythonApplication {
           pname = "peerix";

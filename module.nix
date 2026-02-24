@@ -259,7 +259,7 @@ in
           PrivateDevices = true;
           PrivateTmp = true;
           PrivateIPC = true;
-          PrivateUsers = true;
+          # PrivateUsers breaks Python wrapper access to nix store
 
           SystemCallFilter = [
             "@aio"
@@ -324,8 +324,13 @@ in
           listenAddrsArgs = lib.optionalString (cfg.listenAddrs != [])
             "--listen-addrs ${lib.concatStringsSep " " cfg.listenAddrs}";
           ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
+          # Use Python directly with -m to avoid wrapper script access issues with PrivateUsers
+          pythonEnv = pkgs.peerix-python;
+          peerixPkg = pkgs.peerix-full-unwrapped;
         in ''
-          exec ${cfg.package}/bin/peerix \
+          export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
+          export PYTHONPATH="${peerixPkg}/lib/python3.13/site-packages:$PYTHONPATH"
+          exec ${pythonEnv}/bin/python -m peerix \
             ${modeArgs} \
             ${trackerArgs} \
             ${verifyArgs} \
@@ -392,10 +397,17 @@ in
           ReadWritePaths = [ (builtins.dirOf tcfg.dbPath) ];
           ExecPaths = [ "/nix/store" ];
         };
-        script = ''
-          exec ${tcfg.package}/bin/peerix-tracker \
-            --port ${toString tcfg.port} \
-            --db-path ${tcfg.dbPath}
+        script = let
+          pythonEnv = pkgs.peerix-python;
+          peerixPkg = pkgs.peerix-full-unwrapped;
+        in ''
+          export PYTHONPATH="${peerixPkg}/lib/python3.13/site-packages:$PYTHONPATH"
+          exec ${pythonEnv}/bin/python -c "
+import sys
+sys.argv = ['peerix-tracker', '--port', '${toString tcfg.port}', '--db-path', '${tcfg.dbPath}']
+from peerix.tracker_main import run
+run()
+"
         '';
       };
 
