@@ -17,22 +17,12 @@ class TrackerClient:
         self.local_port = local_port
         self.libp2p_peer_id = libp2p_peer_id
         self._client: t.Optional[httpx.AsyncClient] = None
-        self._cancel_scope: t.Optional[trio.CancelScope] = None
-        self._nursery: t.Optional[trio.Nursery] = None
         self._package_hashes: t.List[str] = []  # Store path hashes to announce
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
-
-    async def start_heartbeat(self):
-        # Start heartbeat in background
-        # Note: The nursery must be passed from outside or we need a different approach
-        # For now, we'll start it as a standalone coroutine that gets cancelled on close
-        self._cancel_scope = trio.CancelScope()
-        # We can't start background tasks here without a nursery
-        # The heartbeat will be started lazily on first announce
 
     async def run_heartbeat(self, task_status=trio.TASK_STATUS_IGNORED):
         """Run the heartbeat loop. Should be called from within a nursery."""
@@ -127,7 +117,5 @@ class TrackerClient:
             logger.warning(f"Report failed for transfer {transfer_id}: {e}")
 
     async def close(self):
-        if self._cancel_scope is not None:
-            self._cancel_scope.cancel()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()

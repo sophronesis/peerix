@@ -6,9 +6,14 @@ Collects store path hashes to announce to the tracker.
 import typing as t
 import logging
 import subprocess
+import hashlib
 import os
 
 logger = logging.getLogger("peerix.store_scanner")
+
+# Cache for store state hash to avoid re-scanning
+_last_store_hash: t.Optional[str] = None
+_cached_hashes: t.List[str] = []
 
 
 def get_store_path_hash(path: str) -> t.Optional[str]:
@@ -23,16 +28,42 @@ def get_store_path_hash(path: str) -> t.Optional[str]:
     return rest[:32]
 
 
-def scan_store_paths(limit: int = 1000) -> t.List[str]:
+def compute_store_hash() -> str:
+    """
+    Compute a hash of the store state based on directory listing.
+
+    Uses the sorted list of store path names to create a digest.
+    This is fast because it only reads directory entries, not file contents.
+    """
+    try:
+        entries = sorted(os.listdir("/nix/store"))
+        # Hash the sorted list of entries
+        content = "\n".join(entries).encode("utf-8")
+        return hashlib.sha256(content).hexdigest()[:16]
+    except Exception as e:
+        logger.warning(f"Failed to compute store hash: {e}")
+        return ""
+
+
+def scan_store_paths(limit: int = 1000, skip_derivations: bool = True) -> t.List[str]:
     """
     Scan the local nix store and return a list of store path hashes.
 
     Args:
-        limit: Maximum number of paths to return
+        limit: Maximum number of paths to return (0 = unlimited)
+        skip_derivations: If True, skip .drv files (default: True)
 
     Returns:
         List of 32-character store path hashes
     """
+    global _last_store_hash, _cached_hashes
+
+    # Check if store state has changed
+    current_hash = compute_store_hash()
+    if current_hash and current_hash == _last_store_hash and _cached_hashes:
+        logger.debug(f"Store unchanged (hash={current_hash}), using cached {len(_cached_hashes)} paths")
+        return _cached_hashes
+
     hashes = []
 
     try:
@@ -41,16 +72,19 @@ def scan_store_paths(limit: int = 1000) -> t.List[str]:
             ["nix", "path-info", "--all"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,  # Increased timeout for large stores
         )
 
         if result.returncode != 0:
             logger.warning(f"nix path-info failed: {result.stderr}")
-            return []
+            return _cached_hashes if _cached_hashes else []
 
         for line in result.stdout.strip().split("\n"):
             path = line.strip()
             if not path:
+                continue
+            # Skip derivation files - they're build recipes, not actual outputs
+            if skip_derivations and path.endswith(".drv"):
                 continue
             h = get_store_path_hash(path)
             if h:
@@ -60,12 +94,19 @@ def scan_store_paths(limit: int = 1000) -> t.List[str]:
 
     except subprocess.TimeoutExpired:
         logger.warning("nix path-info timed out")
+        return _cached_hashes if _cached_hashes else []
     except FileNotFoundError:
         logger.warning("nix command not found")
+        return []
     except Exception as e:
         logger.warning(f"Store scan failed: {e}")
+        return _cached_hashes if _cached_hashes else []
 
-    logger.info(f"Scanned {len(hashes)} store paths")
+    # Update cache
+    _last_store_hash = current_hash
+    _cached_hashes = hashes
+
+    logger.info(f"Scanned {len(hashes)} store paths (hash={current_hash})")
     return hashes
 
 

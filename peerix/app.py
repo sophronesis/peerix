@@ -280,8 +280,8 @@ async def _setup_wan(local_store, local_port, tracker_url, no_verify,
     store_hashes = scan_store_paths(limit=0)
     tracker_client.set_package_hashes(store_hashes)
     logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
-
-    await tracker_client.start_heartbeat()
+    # Note: WAN mode does not start a heartbeat - packages announced once only
+    # TODO: Add nursery-based heartbeat like IPFS mode has
 
     client = httpx.AsyncClient()
     tracker_store = TrackerStore(serving_store, tracker_client, client)
