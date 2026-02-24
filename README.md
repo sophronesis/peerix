@@ -4,6 +4,44 @@ Peerix
 Peerix is a peer-to-peer binary cache for nix derivations.
 Every participating node can pull derivations from each other instances' respective nix-stores.
 
+Quick Start
+-----------
+
+### P2P Mode (recommended)
+
+Works out of the box - connects to public bootstrap server, NAT traversal built-in:
+
+```nix
+services.peerix.enable = true;
+```
+
+### Run Your Own Bootstrap/Tracker
+
+Host a bootstrap server for your network:
+
+```nix
+# On your server
+services.peerix.enable = true;
+services.peerix-tracker.enable = true;
+
+# On clients
+services.peerix = {
+  enable = true;
+  bootstrapUrl = "https://your-server.com/peerix/bootstrap";
+};
+```
+
+### LAN Only Mode
+
+For local network only (no internet required):
+
+```nix
+services.peerix = {
+  enable = true;
+  mode = "lan";
+};
+```
+
 How does it work?
 -----------------
 
@@ -11,12 +49,14 @@ Peerix implements a nix binary cache. When the nix package manager queries peeri
 will ask the network if any other peerix instances hold the package, and if some other instance
 holds the derivation, it will download the derivation from that instance.
 
+Store path hashes are verified against `cache.nixos.org` by default, ensuring packages haven't been tampered with.
+
 Peerix supports multiple discovery modes:
 
-- **LAN** (default): UDP broadcast on the local network for zero-config peer discovery.
-- **WAN**: Tracker-based discovery for peers across different networks (NAT, VPN, cloud, etc).
+- **LibP2P** (default): P2P networking with NAT traversal using libp2p (DHT, mDNS, hole punching).
+- **LAN**: UDP broadcast on the local network for zero-config peer discovery.
+- **WAN**: Tracker-based discovery for peers across different networks.
 - **Both**: LAN and WAN simultaneously.
-- **LibP2P**: P2P networking with NAT traversal using libp2p (DHT, mDNS, hole punching).
 - **Hybrid**: LibP2P combined with tracker for maximum compatibility.
 
 Installation
@@ -34,14 +74,7 @@ Add peerix as a flake input:
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
         peerix.nixosModules.peerix
-        {
-          services.peerix = {
-            enable = true;
-            # Optional: sign derivations so peers can verify authenticity
-            privateKeyFile = "/path/to/cache-priv-key.pem";
-            publicKey = "myhost:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-          };
-        }
+        { services.peerix.enable = true; }
       ];
     };
   };
@@ -124,7 +157,7 @@ WAN mode enables peer-to-peer sharing across different networks using a lightwei
 1. Run a tracker on an accessible host:
 
 ```nix
-services.peerix.tracker.enable = true;
+services.peerix-tracker.enable = true;
 ```
 
 2. Configure peers to use WAN mode:
@@ -132,12 +165,12 @@ services.peerix.tracker.enable = true;
 ```nix
 services.peerix = {
   enable = true;
-  mode = "wan";  # or "both" for LAN + WAN
+  mode = "wan";
   trackerUrl = "http://tracker-host:12305";
 };
 ```
 
-3. For peers behind NAT or port forwarding, use `announceAddr` to specify the reachable address:
+3. For peers behind NAT, use `announceAddr` to specify the reachable address:
 
 ```nix
 services.peerix = {
