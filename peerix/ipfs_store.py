@@ -41,6 +41,7 @@ class IPFSStore(Store):
         publish_local: bool = True,
         fetch_timeout: float = 60.0,
         tracker_client: t.Any = None,
+        upstream_cache: str = "https://cache.nixos.org",
     ):
         """
         Initialize the IPFS store.
@@ -52,6 +53,7 @@ class IPFSStore(Store):
             publish_local: Whether to publish local NARs to IPFS
             fetch_timeout: Timeout for IPFS fetches
             tracker_client: Optional tracker client for CID registry
+            upstream_cache: Upstream cache URL for narinfo fallback
         """
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -59,6 +61,7 @@ class IPFSStore(Store):
         self.publish_local = publish_local
         self.fetch_timeout = fetch_timeout
         self.tracker_client = tracker_client
+        self.upstream_cache = upstream_cache.rstrip("/")
 
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID
@@ -184,6 +187,20 @@ class IPFSStore(Store):
         except Exception:
             return False
 
+    async def _fetch_upstream_narinfo(self, hsh: str) -> t.Optional[NarInfo]:
+        """Fetch narinfo from upstream cache."""
+        try:
+            client = await self._get_client()
+            url = f"{self.upstream_cache}/{hsh}.narinfo"
+            resp = await client.get(url, timeout=10.0)
+            if resp.status_code == 200:
+                logger.debug(f"Fetched narinfo from upstream for {hsh}")
+                return NarInfo.parse(resp.text)
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to fetch upstream narinfo for {hsh}: {e}")
+            return None
+
     async def narinfo(self, hsh: str) -> t.Optional[NarInfo]:
         """
         Query narinfo, checking IPFS for the NAR.
@@ -211,15 +228,18 @@ class IPFSStore(Store):
         # If we have a CID, check if content is available in IPFS
         if cid:
             if await self.check_ipfs_has(cid):
-                # We need narinfo metadata from local store
+                # Try local store first for narinfo metadata
                 ni = await self.local_store.narinfo(hsh)
+                if ni is None:
+                    # Try upstream cache for narinfo
+                    ni = await self._fetch_upstream_narinfo(hsh)
                 if ni:
                     # Rewrite URL to use IPFS
                     ipfs_url = f"ipfs/{cid}"
                     logger.info(f"Found {hsh} in IPFS: {cid}")
                     return ni._replace(url=ipfs_url)
                 else:
-                    # We know the CID but don't have narinfo locally
+                    # We know the CID but can't get narinfo
                     logger.debug(f"Have CID but no narinfo for {hsh}")
             else:
                 logger.debug(f"CID {cid} not available in IPFS network")
