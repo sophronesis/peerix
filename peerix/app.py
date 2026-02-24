@@ -184,7 +184,12 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
         store_hashes = scan_recent_paths(limit=500)
         tracker_client.set_package_hashes(store_hashes)
         logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
-        await tracker_client.start_heartbeat()
+        # Do initial announce
+        try:
+            await tracker_client.announce()
+            logger.info(f"Announced to tracker as peer {peer_id}")
+        except Exception as e:
+            logger.warning(f"Initial tracker announce failed: {e}")
 
     ipfs_store = IPFSStore(serving_store, tracker_client=tracker_client)
     ipfs_access = PrefixStore("v5/ipfs", ipfs_store)
