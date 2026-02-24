@@ -150,19 +150,22 @@ async def setup_stores(
             )
             ipfs_access = ipfs_info
             try:
-                # Start periodic scan in background if enabled
-                if scan_interval > 0:
-                    async with trio.open_nursery() as nursery:
-                        ipfs_info["_scan_nursery"] = nursery
+                # Start background tasks: heartbeat and periodic scan
+                async with trio.open_nursery() as nursery:
+                    ipfs_info["_nursery"] = nursery
+                    # Start tracker heartbeat if tracker is configured
+                    tracker_client = ipfs_info.get("tracker_client")
+                    if tracker_client is not None:
+                        nursery.start_soon(tracker_client.run_heartbeat)
+                    # Start periodic scan if enabled
+                    if scan_interval > 0:
                         nursery.start_soon(
                             ipfs_info["store"].run_periodic_scan,
                             scan_interval,
                             filter_patterns,
                         )
-                        yield
-                        nursery.cancel_scope.cancel()
-                else:
                     yield
+                    nursery.cancel_scope.cancel()
             finally:
                 await _cleanup_ipfs(ipfs_info)
                 ipfs_access = None
