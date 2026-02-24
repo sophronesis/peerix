@@ -142,6 +142,25 @@ def create_tracker_app(db_path: str) -> Starlette:
         logger.info(f"Peer {peer_id} announced from {addr}:{port} (libp2p={libp2p_peer_id}, pkgs={pkg_count})")
         return JSONResponse({"status": "ok"})
 
+    @app.route("/status", methods=["GET"])
+    async def status(req: Request) -> Response:
+        """Return tracker status with peer and CID counts."""
+        cutoff = time.time() - PEER_TTL
+        peer_count = conn.execute(
+            "SELECT COUNT(*) FROM peers WHERE last_seen >= ?", (cutoff,)
+        ).fetchone()[0]
+        cid_count = conn.execute("SELECT COUNT(*) FROM cid_mappings").fetchone()[0]
+        package_count = conn.execute(
+            "SELECT COUNT(DISTINCT hash) FROM packages WHERE last_seen >= ?", (cutoff,)
+        ).fetchone()[0]
+        return JSONResponse({
+            "status": "ok",
+            "mode": "ipfs",
+            "peers": peer_count,
+            "cid_mappings": cid_count,
+            "packages": package_count,
+        })
+
     @app.route("/peers", methods=["GET"])
     async def list_peers(req: Request) -> Response:
         cutoff = time.time() - PEER_TTL
