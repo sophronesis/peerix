@@ -83,13 +83,13 @@ in
 
       mode = lib.mkOption {
         type = types.enum [ "lan" "wan" "both" "libp2p" "hybrid" ];
-        default = "lan";
+        default = "libp2p";
         description = ''
           Discovery mode:
+          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching) [default]
           - lan: UDP broadcast for local network discovery
           - wan: HTTP tracker-based discovery
           - both: lan + wan combined
-          - libp2p: P2P discovery with NAT traversal (DHT, mDNS, hole punching)
           - hybrid: libp2p + tracker for maximum compatibility
         '';
       };

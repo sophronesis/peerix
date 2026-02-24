@@ -70,7 +70,7 @@ Configuration Options
 | `services.peerix.enable`         | Enables Peerix.                                                                              | `false`   |
 | `services.peerix.openFirewall`   | Open the necessary firewall ports.                                                           | `true`    |
 | `services.peerix.port`           | Port for the HTTP server and peer announcements.                                             | `12304`   |
-| `services.peerix.mode`           | Discovery mode: `"lan"`, `"wan"`, `"both"`, `"libp2p"`, or `"hybrid"`.                       | `"lan"`   |
+| `services.peerix.mode`           | Discovery mode: `"libp2p"`, `"lan"`, `"wan"`, `"both"`, or `"hybrid"`.                       | `"libp2p"`|
 | `services.peerix.user`           | User to run the peerix service under.                                                        | `"nobody"`|
 | `services.peerix.group`          | Group to run the peerix service under.                                                       | `"nobody"`|
 | `services.peerix.privateKeyFile` | Path to the private key file for signing derivations.                                        | `null`    |
