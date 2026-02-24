@@ -82,6 +82,25 @@ class TrackerClient:
         # Filter out ourselves
         return [p for p in data.get("providers", []) if p["peer_id"] != self.peer_id]
 
+    async def get_cid(self, nar_hash: str) -> t.Optional[str]:
+        """Get IPFS CID for a NarHash."""
+        client = await self._get_client()
+        resp = await client.get(f"{self.tracker_url}/cid/{nar_hash}")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data.get("cid")
+
+    async def register_cid(self, nar_hash: str, cid: str) -> bool:
+        """Register an IPFS CID for a NarHash."""
+        client = await self._get_client()
+        resp = await client.post(f"{self.tracker_url}/cid", json={
+            "nar_hash": nar_hash,
+            "cid": cid,
+            "peer_id": self.peer_id,
+        })
+        return resp.status_code == 200
+
     async def init_transfer(self, receiver_id: str) -> t.Optional[int]:
         client = await self._get_client()
         resp = await client.post(f"{self.tracker_url}/transfer/init", json={

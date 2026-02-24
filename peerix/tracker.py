@@ -64,6 +64,17 @@ def init_db(db_path: str) -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_hash ON packages(hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_peer ON packages(peer_id)")
+
+    # IPFS CID mappings: NarHash → IPFS CID
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cid_mappings (
+            nar_hash TEXT PRIMARY KEY,
+            cid TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cid_mappings_cid ON cid_mappings(cid)")
     conn.commit()
     return conn
 
@@ -295,6 +306,47 @@ def create_tracker_app(db_path: str) -> Starlette:
         # Sort by reputation score
         providers.sort(key=lambda p: p["score"], reverse=True)
         return JSONResponse({"hash": store_hash, "providers": providers})
+
+    @app.route("/cid/{nar_hash:str}", methods=["GET"])
+    async def get_cid(req: Request) -> Response:
+        """Get IPFS CID for a NarHash."""
+        nar_hash = req.path_params["nar_hash"]
+        row = conn.execute(
+            "SELECT cid, peer_id, created_at FROM cid_mappings WHERE nar_hash = ?",
+            (nar_hash,)
+        ).fetchone()
+
+        if row is None:
+            return JSONResponse({"error": "CID not found"}, status_code=404)
+
+        return JSONResponse({
+            "nar_hash": nar_hash,
+            "cid": row[0],
+            "peer_id": row[1],
+            "created_at": row[2],
+        })
+
+    @app.route("/cid", methods=["POST"])
+    async def register_cid(req: Request) -> Response:
+        """Register an IPFS CID for a NarHash."""
+        body = await req.json()
+        nar_hash = body.get("nar_hash")
+        cid = body.get("cid")
+        peer_id = body.get("peer_id")
+
+        if not all([nar_hash, cid, peer_id]):
+            return JSONResponse({"error": "nar_hash, cid, and peer_id required"}, status_code=400)
+
+        now = time.time()
+        conn.execute(
+            "INSERT INTO cid_mappings (nar_hash, cid, peer_id, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(nar_hash) DO UPDATE SET cid=?, peer_id=?, created_at=?",
+            (nar_hash, cid, peer_id, now, cid, peer_id, now)
+        )
+        conn.commit()
+
+        logger.info(f"Registered CID mapping: {nar_hash} -> {cid} (peer: {peer_id})")
+        return JSONResponse({"status": "ok", "nar_hash": nar_hash, "cid": cid})
 
     @app.route("/reputation/{peer_id:str}", methods=["GET"])
     async def get_reputation(req: Request) -> Response:

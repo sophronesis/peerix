@@ -40,6 +40,7 @@ class IPFSStore(Store):
         cache_path: str = CID_CACHE_PATH,
         publish_local: bool = True,
         fetch_timeout: float = 60.0,
+        tracker_client: t.Any = None,
     ):
         """
         Initialize the IPFS store.
@@ -50,16 +51,23 @@ class IPFSStore(Store):
             cache_path: Path to CID cache file
             publish_local: Whether to publish local NARs to IPFS
             fetch_timeout: Timeout for IPFS fetches
+            tracker_client: Optional tracker client for CID registry
         """
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
         self.cache_path = cache_path
         self.publish_local = publish_local
         self.fetch_timeout = fetch_timeout
+        self.tracker_client = tracker_client
 
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID
         self._load_cache()
+
+    def set_tracker_client(self, tracker_client: t.Any) -> None:
+        """Set the tracker client for CID registry."""
+        self.tracker_client = tracker_client
+        logger.info("IPFSStore: tracker client configured for CID lookups")
 
     def _load_cache(self) -> None:
         """Load CID cache from disk."""
@@ -176,32 +184,44 @@ class IPFSStore(Store):
         """
         Query narinfo, checking IPFS for the NAR.
 
-        First checks if we have a CID mapping for this hash,
-        then verifies the content is available in IPFS.
+        Discovery strategies:
+        1. Check local CID cache
+        2. Query tracker for CID mapping
+        3. Fall back to local store
         """
-        # Check if we have a CID for this hash
+        # Check local CID cache first
         cid = self._cid_cache.get(hsh)
+
+        # If not in cache, try tracker
+        if cid is None and self.tracker_client is not None:
+            try:
+                cid = await self.tracker_client.get_cid(hsh)
+                if cid:
+                    # Cache it locally
+                    self._cid_cache[hsh] = cid
+                    self._save_cache()
+                    logger.debug(f"Got CID from tracker for {hsh}: {cid}")
+            except Exception as e:
+                logger.debug(f"Tracker CID lookup failed for {hsh}: {e}")
+
+        # If we have a CID, try to fetch from IPFS
         if cid:
-            # Verify it's still available
+            # Check if content is available (with short timeout)
             if await self.check_ipfs_has(cid):
-                # Get narinfo from local store and update URL
+                # We need narinfo metadata - try local or construct minimal one
                 ni = await self.local_store.narinfo(hsh)
                 if ni:
                     # Rewrite URL to use IPFS
                     ipfs_url = f"ipfs/{cid}"
                     logger.info(f"Found {hsh} in IPFS: {cid}")
                     return ni._replace(url=ipfs_url)
+                else:
+                    # We know the CID but don't have narinfo
+                    # For now, skip - could construct minimal narinfo
+                    logger.debug(f"Have CID but no narinfo for {hsh}")
 
-        # Check local store
-        ni = await self.local_store.narinfo(hsh)
-        if ni and self.publish_local:
-            # We have it locally, publish to IPFS in background
-            # (don't block the response)
-            trio.lowlevel.current_trio_token().run_sync_soon(
-                lambda: None  # TODO: publish in background
-            )
-
-        return ni
+        # Fall back to local store
+        return await self.local_store.narinfo(hsh)
 
     async def nar(self, url: str) -> t.AsyncIterable[bytes]:
         """
@@ -262,6 +282,14 @@ class IPFSStore(Store):
             self._cid_cache[hsh] = cid
             self._save_cache()
             logger.info(f"Published {hsh} to IPFS: {cid}")
+
+            # Register with tracker
+            if self.tracker_client is not None:
+                try:
+                    await self.tracker_client.register_cid(hsh, cid)
+                    logger.debug(f"Registered CID with tracker: {hsh} -> {cid}")
+                except Exception as e:
+                    logger.warning(f"Failed to register CID with tracker: {e}")
 
         return cid
 
