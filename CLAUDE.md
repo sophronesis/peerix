@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Peerix is a peer-to-peer binary cache for Nix. It supports multiple discovery modes:
+- **IPFS** (default): Uses local IPFS daemon for content-addressed NAR distribution. CID mappings registered with tracker. On startup, all local NarHash→CID mappings are synced to tracker.
 - **LAN**: UDP broadcast for zero-config peer discovery on local networks.
 - **WAN**: Tracker-based discovery for peers across different networks (NAT, VPN, cloud).
 - **Both**: LAN and WAN simultaneously.
@@ -28,6 +29,9 @@ nix run . -- --port 12304 --timeout 50 --verbose
 
 # Run with WAN mode
 nix run . -- --mode wan --tracker-url http://tracker:12305 --verbose
+
+# Run with IPFS mode (requires local IPFS daemon)
+nix run . -- --mode ipfs --tracker-url http://tracker:12305 --verbose
 
 # Run with signing
 NIX_SECRET_KEY_FILE=/path/to/key.pem nix run . -- --verbose
@@ -66,8 +70,18 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **`prefix.py`** — `PrefixStore`: decorator that namespaces URL paths so local, remote, and WAN NAR routes don't collide.
 - **`filtered.py`** — `FilteredStore`: heuristic filtering of system-specific/sensitive derivations for WAN sharing safety.
 - **`verified.py`** — `VerifiedStore`: verifies store path hashes against upstream cache before WAN sharing. Caches expected `narHash` per URL and verifies NAR content on-the-fly during streaming (TOCTOU protection) using SHA256 + Nix base32 encoding.
-- **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to localhost (IPv4 and IPv6). `/local/*` endpoints enforce peer auth when SSH keys are configured (X-Peerix-* headers). Includes ed25519 narinfo signing via `pynacl` when `NIX_SECRET_KEY_FILE` is set. Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v3/wan/` for WAN.
+- **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to localhost (IPv4 and IPv6). `/local/*` endpoints enforce peer auth when SSH keys are configured (X-Peerix-* headers). Includes ed25519 narinfo signing via `pynacl` when `NIX_SECRET_KEY_FILE` is set. Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v3/wan/` for WAN, `/v5/ipfs/` for IPFS.
 - **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--announce-addr`, `--peer-id`, `--ssh-public-key`, `--ssh-private-key`, `--no-verify`, `--no-filter`, etc.
+
+### IPFS modules (`peerix/`)
+
+- **`ipfs_store.py`** — `IPFSStore`: Store implementation using local IPFS daemon. Adds NARs to IPFS via `/api/v0/add`, retrieves via `/api/v0/cat`. Maintains local CID cache at `/var/lib/peerix/cid_cache.json`. Key methods:
+  - `add_to_ipfs()`, `get_from_ipfs()`, `check_ipfs_has()`: IPFS daemon interaction
+  - `publish_nar()`: Publish single NAR to IPFS and cache mapping
+  - `sync_cid_mappings_to_tracker()`: Register all local CID mappings with tracker (called on startup)
+  - `scan_and_publish()`: Scan store paths, filter, and publish to IPFS
+  - `run_periodic_scan()`: Background task that periodically scans and publishes (configurable interval, default 1 hour)
+- **`ipfs_compat.py`** — IPFS compatibility layer. Converts between Nix NAR hashes and IPFS CIDs. Handles Nix's custom base32 encoding. `IPFSBridge` class for optional IPFS DHT announcements when using libp2p. Key functions: `nar_hash_to_cid()`, `cid_to_nar_hash()`, `decode_nix_hash()`.
 
 ### LibP2P modules (`peerix/`)
 
@@ -83,6 +97,7 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **LAN**: UDP port 12304 (configurable) — peer discovery via broadcast. Packet byte 0 is message type (0=request, 1=response), bytes 1-4 are request ID.
 - **WAN**: Peers announce to tracker via HTTP POST `/announce`. Tracker responds with peer list at GET `/peers`. Transfers are tracked via `/transfer/init` and `/transfer/report`.
 - **LibP2P**: TCP port 13304 (HTTP port + 1000) — P2P connections with Kademlia DHT for peer discovery. Uses custom protocols `/peerix/narinfo/1.0.0` and `/peerix/nar/1.0.0` for store queries. Network isolation via `--network-id` (hashed to DHT key). Bootstrap peers specified via `--bootstrap-peers` multiaddr format (e.g., `/ip4/1.2.3.4/tcp/13304/p2p/QmPeerID`).
+- **IPFS**: Uses local IPFS daemon API (`http://127.0.0.1:5001/api/v0`). NARs are added via `/add` and fetched via `/cat`. CID mappings registered with tracker via `POST /cid` and looked up via `GET /cid/{nar_hash}`. Uses `routing/findprovs` to check content availability. NAR URLs use `ipfs/{cid}` format.
 - **HTTP port 12304** (configurable): serves local narinfo/NAR to peers and proxied remote/WAN content to the local nix daemon.
 
 ### NixOS integration
@@ -112,6 +127,10 @@ Optional SSH ed25519 key-based authentication. When `--ssh-public-key` and `--ss
 - **py-libp2p 0.6.0 API**: Methods like `provide()` and `find_providers()` on KadDHT are async. The `INotifee` connected callback receives `SwarmConn` which wraps `muxed_conn` with `peer_id` attribute (not `INetConn.get_remote_peer()`).
 - **LibP2P NAT traversal**: Requires a publicly accessible bootstrap peer. Peers behind NAT cannot be directly connected to without hole punching or relay servers.
 - **LibP2P port**: Uses HTTP port + 1000 (default: 13304) for libp2p TCP connections. Both ports need firewall rules.
+- **IPFS mode requires daemon**: The local IPFS daemon must be running (`ipfs daemon` or `services.kubo.enable`). API defaults to `http://127.0.0.1:5001/api/v0`.
+- **IPFS CID cache**: Stored at `/var/lib/peerix/cid_cache.json`. On startup, all local CID mappings are pre-registered with the tracker via `sync_cid_mappings_to_tracker()`.
+- **IPFS NAR URL format**: NARs fetched from IPFS use URL format `ipfs/{cid}`. The `IPFSStore.nar()` method handles both IPFS URLs and local store paths.
+- **IPFS findprovs API**: Uses `routing/findprovs` (new API, replacing deprecated `dht/findprovs`). Response is NDJSON; Type=4 indicates provider found.
 
 ## Test VM (`test-vm/`)
 
@@ -139,5 +158,7 @@ To test: build a derivation on one peer using `test-vm/slow-build.nix` (same pin
 
 ## Dependencies
 
-Python: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `pynacl` (optional, for narinfo signing)
+Python: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `httpx`, `pynacl` (optional, for narinfo signing)
+IPFS mode: `httpx`, `trio`, local IPFS daemon (kubo)
+LibP2P mode: `libp2p`, `trio`, `trio-typing`
 System: `nix`, `nix-serve` (both must be on PATH)

@@ -21,10 +21,10 @@ parser.add_argument("--private-key", required=False)
 parser.add_argument("--timeout", type=int, default=50)
 
 # Mode selection
-parser.add_argument("--mode", choices=["lan", "wan", "both", "libp2p", "hybrid", "ipfs"], default="lan",
-                    help="Discovery mode: lan (UDP broadcast), wan (tracker-based), "
-                         "libp2p (P2P with NAT traversal), hybrid (libp2p + tracker), "
-                         "ipfs (IPFS-based P2P), or both (lan + wan)")
+parser.add_argument("--mode", choices=["lan", "wan", "both", "libp2p", "hybrid", "ipfs"], default="ipfs",
+                    help="Discovery mode: ipfs (IPFS-based P2P, default), lan (UDP broadcast), "
+                         "wan (tracker-based), libp2p (P2P with NAT traversal), "
+                         "hybrid (libp2p + tracker), or both (lan + wan)")
 
 # WAN options
 parser.add_argument("--tracker-url", default=None,
@@ -47,6 +47,12 @@ parser.add_argument("--identity-file", default="/var/lib/peerix/identity.key",
                     help="Path to persistent identity key file (keeps peer ID stable across restarts)")
 parser.add_argument("--enable-ipfs-compat", action="store_true",
                     help="Enable IPFS compatibility layer (announce NARs to IPFS DHT)")
+
+# IPFS scan options
+parser.add_argument("--scan-interval", type=int, default=3600,
+                    help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
+parser.add_argument("--scan-limit", type=int, default=500,
+                    help="Maximum store paths to process per scan (default: 500)")
 
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
@@ -127,6 +133,9 @@ async def main(args):
         listen_addrs=args.listen_addrs,
         identity_file=args.identity_file,
         enable_ipfs_compat=args.enable_ipfs_compat,
+        # IPFS scan options
+        scan_interval=args.scan_interval,
+        scan_limit=args.scan_limit,
     ):
         await serve(app, config)
 

@@ -48,6 +48,9 @@ async def setup_stores(
     listen_addrs: t.List[str] = None,
     identity_file: str = "/var/lib/peerix/identity.key",
     enable_ipfs_compat: bool = False,
+    # IPFS scan options
+    scan_interval: int = 3600,
+    scan_limit: int = 500,
 ):
     global l_access, r_access, w_access, p2p_access, ipfs_access
     w_access = None
@@ -144,17 +147,32 @@ async def setup_stores(
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
                 no_filter, filter_patterns, no_default_filters, peer_id,
+                scan_interval, scan_limit,
             )
             ipfs_access = ipfs_info
             try:
-                yield
+                # Start periodic scan in background if enabled
+                if scan_interval > 0:
+                    async with trio.open_nursery() as nursery:
+                        ipfs_info["_scan_nursery"] = nursery
+                        nursery.start_soon(
+                            ipfs_info["store"].run_periodic_scan,
+                            scan_interval,
+                            scan_limit,
+                            filter_patterns,
+                        )
+                        yield
+                        nursery.cancel_scope.cancel()
+                else:
+                    yield
             finally:
                 await _cleanup_ipfs(ipfs_info)
                 ipfs_access = None
 
 
 async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
-                      no_filter, filter_patterns, no_default_filters, peer_id):
+                      no_filter, filter_patterns, no_default_filters, peer_id,
+                      scan_interval=3600, scan_limit=500):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
     from peerix.store_scanner import scan_recent_paths
@@ -193,6 +211,15 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
 
     ipfs_store = IPFSStore(serving_store, tracker_client=tracker_client)
     ipfs_access = PrefixStore("v5/ipfs", ipfs_store)
+
+    # Sync local CID mappings to tracker on startup
+    if tracker_client is not None:
+        try:
+            registered = await ipfs_store.sync_cid_mappings_to_tracker()
+            if registered > 0:
+                logger.info(f"Pre-registered {registered} CID mappings with tracker")
+        except Exception as e:
+            logger.warning(f"Failed to sync CID mappings to tracker: {e}")
 
     logger.info("IPFS store initialized" + (" with tracker" if tracker_client else ""))
 

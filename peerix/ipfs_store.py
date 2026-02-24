@@ -9,11 +9,14 @@ import logging
 import hashlib
 import json
 import os
+import fnmatch
 
 import httpx
 import trio
 
 from peerix.store import NarInfo, CacheInfo, Store
+from peerix.store_scanner import scan_recent_paths, get_store_path_hash
+from peerix.filtered import DEFAULT_EXCLUDE_PATTERNS
 
 
 logger = logging.getLogger("peerix.ipfs")
@@ -23,6 +26,9 @@ IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
 
 # Path to store NarHash → CID mappings
 CID_CACHE_PATH = "/var/lib/peerix/cid_cache.json"
+
+# Default scan interval (1 hour)
+DEFAULT_SCAN_INTERVAL = 3600
 
 
 class IPFSStore(Store):
@@ -71,6 +77,46 @@ class IPFSStore(Store):
         """Set the tracker client for CID registry."""
         self.tracker_client = tracker_client
         logger.info("IPFSStore: tracker client configured for CID lookups")
+
+    async def sync_cid_mappings_to_tracker(self) -> int:
+        """
+        Register all local CID mappings with the tracker.
+
+        Called on startup to ensure tracker has our complete CID registry.
+        This enables other peers to discover content we have in IPFS.
+
+        Returns:
+            Number of CID mappings successfully registered
+        """
+        if self.tracker_client is None:
+            logger.debug("No tracker client, skipping CID sync")
+            return 0
+
+        if not self._cid_cache:
+            logger.debug("No local CID mappings to sync")
+            return 0
+
+        logger.info(f"Syncing {len(self._cid_cache)} CID mappings to tracker...")
+        registered = 0
+        failed = 0
+
+        for nar_hash, cid in self._cid_cache.items():
+            try:
+                success = await self.tracker_client.register_cid(nar_hash, cid)
+                if success:
+                    registered += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.debug(f"Failed to register CID {nar_hash}: {e}")
+                failed += 1
+
+        if failed > 0:
+            logger.warning(f"CID sync: {registered} registered, {failed} failed")
+        else:
+            logger.info(f"CID sync complete: {registered} mappings registered")
+
+        return registered
 
     def _load_cache(self) -> None:
         """Load CID cache from disk."""
@@ -329,6 +375,106 @@ class IPFSStore(Store):
                     logger.warning(f"Failed to register CID with tracker: {e}")
 
         return cid
+
+    def _is_excluded(self, store_path: str, extra_patterns: t.List[str] = None) -> bool:
+        """Check if a store path should be excluded from IPFS publishing."""
+        basename = os.path.basename(store_path)
+        patterns = DEFAULT_EXCLUDE_PATTERNS + (extra_patterns or [])
+        for pattern in patterns:
+            if fnmatch.fnmatch(basename, pattern):
+                return True
+        return False
+
+    async def scan_and_publish(
+        self,
+        limit: int = 500,
+        extra_patterns: t.List[str] = None,
+    ) -> t.Tuple[int, int]:
+        """
+        Scan local nix store and publish applicable packages to IPFS.
+
+        Args:
+            limit: Maximum number of store paths to scan
+            extra_patterns: Additional fnmatch patterns to exclude
+
+        Returns:
+            Tuple of (published_count, skipped_count)
+        """
+        logger.info(f"Scanning nix store for IPFS publishing (limit={limit})...")
+
+        # Get recent store paths
+        store_hashes = scan_recent_paths(limit=limit)
+        logger.info(f"Found {len(store_hashes)} store paths to process")
+
+        published = 0
+        skipped = 0
+        already_cached = 0
+
+        for hsh in store_hashes:
+            # Skip if already in cache
+            if hsh in self._cid_cache:
+                already_cached += 1
+                continue
+
+            # Get narinfo to check store path name
+            try:
+                ni = await self.local_store.narinfo(hsh)
+                if ni is None:
+                    skipped += 1
+                    continue
+
+                # Check exclusion patterns
+                if self._is_excluded(ni.storePath, extra_patterns):
+                    logger.debug(f"Excluded: {ni.storePath}")
+                    skipped += 1
+                    continue
+
+                # Publish to IPFS
+                cid = await self.publish_nar(hsh)
+                if cid:
+                    published += 1
+                    logger.debug(f"Published {hsh} -> {cid}")
+                else:
+                    skipped += 1
+
+            except Exception as e:
+                logger.debug(f"Failed to process {hsh}: {e}")
+                skipped += 1
+
+        logger.info(
+            f"Store scan complete: {published} published, {skipped} skipped, "
+            f"{already_cached} already cached"
+        )
+        return published, skipped
+
+    async def run_periodic_scan(
+        self,
+        interval: float = DEFAULT_SCAN_INTERVAL,
+        limit: int = 500,
+        extra_patterns: t.List[str] = None,
+    ) -> None:
+        """
+        Run periodic store scanning in background.
+
+        Args:
+            interval: Seconds between scans (default: 3600 = 1 hour)
+            limit: Maximum store paths per scan
+            extra_patterns: Additional exclusion patterns
+        """
+        logger.info(f"Starting periodic IPFS store scan (interval={interval}s)")
+
+        while True:
+            try:
+                published, skipped = await self.scan_and_publish(limit, extra_patterns)
+
+                # Sync new mappings to tracker
+                if published > 0 and self.tracker_client is not None:
+                    await self.sync_cid_mappings_to_tracker()
+
+            except Exception as e:
+                logger.warning(f"Periodic scan failed: {e}")
+
+            await trio.sleep(interval)
 
 
 class IPFSNarInfoStore(Store):
