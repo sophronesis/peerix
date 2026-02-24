@@ -261,18 +261,8 @@ in
           PrivateIPC = true;
           # PrivateUsers breaks Python wrapper access to nix store
 
-          SystemCallFilter = [
-            "@aio"
-            "@basic-io"
-            "@file-system"
-            "@io-event"
-            "@process"
-            "@network-io"
-            "@timer"
-            "@signal"
-            "@alarm"
-          ];
-          SystemCallErrorNumber = "EPERM";
+          # SystemCallFilter disabled - trio/asyncio need various syscalls
+          # that are hard to enumerate. Other protections still apply.
 
           ProtectSystem = "full";
           ProtectHome = true;
