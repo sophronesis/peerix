@@ -150,13 +150,17 @@ async def setup_stores(
             )
             ipfs_access = ipfs_info
             try:
-                # Start background tasks: heartbeat and periodic scan
+                # Start background tasks: heartbeat, CID sync, and periodic scan
                 async with trio.open_nursery() as nursery:
                     ipfs_info["_nursery"] = nursery
                     # Start tracker heartbeat if tracker is configured
                     tracker_client = ipfs_info.get("tracker_client")
                     if tracker_client is not None:
                         nursery.start_soon(tracker_client.run_heartbeat)
+                        # Sync CID mappings in background (non-blocking)
+                        nursery.start_soon(
+                            ipfs_info["store"].sync_cid_mappings_to_tracker
+                        )
                     # Start periodic scan if enabled
                     if scan_interval > 0:
                         nursery.start_soon(
@@ -213,15 +217,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
     ipfs_store = IPFSStore(serving_store, tracker_client=tracker_client)
     ipfs_access = PrefixStore("v5/ipfs", ipfs_store)
 
-    # Sync local CID mappings to tracker on startup
-    if tracker_client is not None:
-        try:
-            registered = await ipfs_store.sync_cid_mappings_to_tracker()
-            if registered > 0:
-                logger.info(f"Pre-registered {registered} CID mappings with tracker")
-        except Exception as e:
-            logger.warning(f"Failed to sync CID mappings to tracker: {e}")
-
+    # Note: CID sync moved to background task to avoid blocking startup
     logger.info("IPFS store initialized" + (" with tracker" if tracker_client else ""))
 
     return {
