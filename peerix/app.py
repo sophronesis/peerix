@@ -258,31 +258,6 @@ async def _setup_libp2p(
     logger.info(f"LibP2P host started: peer_id={host.peer_id}")
     logger.info(f"LibP2P listening on: {host.addrs}")
 
-    # Start background task to write peer status to file
-    import trio
-    status_file = "/tmp/peerix-peers.json"
-
-    async def write_peer_status():
-        import json
-        while True:
-            try:
-                peers = host.get_peers()
-                status = {
-                    "peer_id": str(host.peer_id),
-                    "network_id": dht.config.network_id if dht else None,
-                    "peers": [str(p.peer_id) for p in peers],
-                    "peer_count": len(peers),
-                }
-                with open(status_file, "w") as f:
-                    json.dump(status, f)
-            except Exception as e:
-                logger.debug(f"Failed to write peer status: {e}")
-            await trio.sleep(5)
-
-    # Start the background task in a nursery
-    nursery = host._nursery  # Use the host's existing nursery
-    nursery.start_soon(write_peer_status)
-
     return {
         "access": libp2p_access,
         "host": host,
@@ -291,7 +266,6 @@ async def _setup_libp2p(
         "verified_store": verified_store,
         "serving_store": serving_store,
         "ipfs_bridge": ipfs_bridge,
-        "status_file": status_file,
     }
 
 
@@ -455,16 +429,14 @@ async def libp2p_status(req: Request) -> Response:
     host = p2p_access.get("host")
     dht = p2p_access.get("dht")
 
-    # Read connected peers from file (written by background task)
-    import json
+    # Get connected peers directly from host
     connected_peers = []
-    status_file = p2p_access.get("status_file", "/tmp/peerix-peers.json")
     try:
-        with open(status_file, "r") as f:
-            peer_data = json.load(f)
-            connected_peers = peer_data.get("peers", [])
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+        if host:
+            peers = host.get_peers()
+            connected_peers = [str(p.peer_id) for p in peers]
+    except Exception as e:
+        logger.debug(f"Failed to get peers: {e}")
 
     status = {
         "peer_id": str(host.peer_id) if host else None,
@@ -475,6 +447,7 @@ async def libp2p_status(req: Request) -> Response:
         "peers": connected_peers,
     }
 
+    import json
     return Response(content=json.dumps(status), status_code=200,
                    media_type="application/json")
 
