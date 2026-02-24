@@ -141,8 +141,10 @@ async def setup_stores(
         elif mode == "ipfs":
             # IPFS mode - uses IPFS for P2P NAR distribution
             r_access = None
-            ipfs_info = await _setup_ipfs(l, no_verify, upstream_cache,
-                                          no_filter, filter_patterns, no_default_filters)
+            ipfs_info = await _setup_ipfs(
+                l, local_port, tracker_url, no_verify, upstream_cache,
+                no_filter, filter_patterns, no_default_filters, peer_id,
+            )
             ipfs_access = ipfs_info
             try:
                 yield
@@ -151,10 +153,14 @@ async def setup_stores(
                 ipfs_access = None
 
 
-async def _setup_ipfs(local_store, no_verify, upstream_cache,
-                      no_filter, filter_patterns, no_default_filters):
-    """Setup IPFS-based NAR sharing."""
+async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
+                      no_filter, filter_patterns, no_default_filters, peer_id):
+    """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
+    from peerix.store_scanner import scan_recent_paths
+
+    if peer_id is None:
+        peer_id = str(uuid.uuid4())
 
     # Build the serving chain: local → verified → filtered
     serving_store = local_store
@@ -169,16 +175,28 @@ async def _setup_ipfs(local_store, no_verify, upstream_cache,
             use_defaults=not no_default_filters,
         )
 
-    ipfs_store = IPFSStore(serving_store)
+    # Create tracker client for CID lookups
+    tracker_client = None
+    if tracker_url:
+        tracker_client = TrackerClient(tracker_url, peer_id, local_port)
+        # Scan and announce store paths
+        logger.info("Scanning local store paths for tracker announcement...")
+        store_hashes = scan_recent_paths(limit=500)
+        tracker_client.set_package_hashes(store_hashes)
+        logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
+        await tracker_client.start_heartbeat()
+
+    ipfs_store = IPFSStore(serving_store, tracker_client=tracker_client)
     ipfs_access = PrefixStore("v5/ipfs", ipfs_store)
 
-    logger.info("IPFS store initialized")
+    logger.info("IPFS store initialized" + (" with tracker" if tracker_client else ""))
 
     return {
         "access": ipfs_access,
         "store": ipfs_store,
         "verified_store": verified_store,
         "serving_store": serving_store,
+        "tracker_client": tracker_client,
     }
 
 
@@ -194,6 +212,10 @@ async def _cleanup_ipfs(ipfs_info):
     vs = ipfs_info.get("verified_store")
     if vs is not None:
         await vs.close()
+
+    tracker_client = ipfs_info.get("tracker_client")
+    if tracker_client is not None:
+        await tracker_client.close()
 
     logger.info("IPFS store stopped")
 
