@@ -96,11 +96,13 @@ class IPFSStore(Store):
             logger.debug("No local CID mappings to sync")
             return 0
 
-        logger.info(f"Syncing {len(self._cid_cache)} CID mappings to tracker...")
+        # Take snapshot to avoid "dictionary changed size during iteration"
+        cid_items = list(self._cid_cache.items())
+        logger.info(f"Syncing {len(cid_items)} CID mappings to tracker...")
         registered = 0
         failed = 0
 
-        for nar_hash, cid in self._cid_cache.items():
+        for nar_hash, cid in cid_items:
             try:
                 success = await self.tracker_client.register_cid(nar_hash, cid)
                 if success:
