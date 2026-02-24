@@ -116,7 +116,8 @@ def create_tracker_app(db_path: str) -> Starlette:
         if not peer_id or port is None:
             return JSONResponse({"error": "peer_id and port required"}, status_code=400)
 
-        addr = req.client.host
+        # Use X-Real-IP or X-Forwarded-For if behind reverse proxy
+        addr = req.headers.get("X-Real-IP") or req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.client.host
         now = time.time()
         libp2p_peer_id = body.get("libp2p_peer_id")
         packages = body.get("packages", [])
