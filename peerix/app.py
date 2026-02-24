@@ -16,7 +16,7 @@ from peerix.filtered import FilteredStore
 from peerix.verified import VerifiedStore
 from peerix.wan import TrackerStore
 from peerix.tracker_client import TrackerClient
-from peerix.store_scanner import scan_recent_paths
+from peerix.store_scanner import scan_store_paths
 
 
 logger = logging.getLogger("peerix.app")
@@ -176,7 +176,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
                       scan_interval=3600):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
-    from peerix.store_scanner import scan_recent_paths
+    from peerix.store_scanner import scan_store_paths
 
     if peer_id is None:
         peer_id = str(uuid.uuid4())
@@ -200,7 +200,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
         tracker_client = TrackerClient(tracker_url, peer_id, local_port)
         # Scan and announce store paths
         logger.info("Scanning local store paths for tracker announcement...")
-        store_hashes = scan_recent_paths(limit=500)
+        store_hashes = scan_store_paths(limit=0)
         tracker_client.set_package_hashes(store_hashes)
         logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
         # Do initial announce
@@ -277,7 +277,7 @@ async def _setup_wan(local_store, local_port, tracker_url, no_verify,
 
     # Scan and announce store paths
     logger.info("Scanning local store paths for tracker announcement...")
-    store_hashes = scan_recent_paths(limit=500)
+    store_hashes = scan_store_paths(limit=0)
     tracker_client.set_package_hashes(store_hashes)
     logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
 

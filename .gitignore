@@ -161,3 +161,4 @@ test-vm/opencv-custom.nix
 
 # Secrets
 *.pem
+deploy
