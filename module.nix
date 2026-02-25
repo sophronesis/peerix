@@ -273,8 +273,8 @@ in
       services.kubo = {
         enable = true;
         settings = {
-          # Enable experimental features needed for peerix
-          Experimental = {
+          # Enable accelerated DHT client for faster lookups
+          Routing = {
             AcceleratedDHTClient = true;
           };
           # API access for peerix
