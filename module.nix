@@ -274,15 +274,11 @@ in
         enable = true;
         settings = {
           # Enable accelerated DHT client for faster lookups
-          Routing = {
-            AcceleratedDHTClient = true;
-          };
-          # API access for peerix
-          API = {
-            HTTPHeaders = {
-              "Access-Control-Allow-Origin" = [ "*" ];
-            };
-          };
+          Routing.AcceleratedDHTClient = true;
+          # Set API to listen on TCP for peerix access
+          Addresses.API = "/ip4/127.0.0.1/tcp/5001";
+          # CORS headers for API access
+          API.HTTPHeaders."Access-Control-Allow-Origin" = [ "*" ];
         };
       };
 
