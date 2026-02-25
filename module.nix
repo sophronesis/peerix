@@ -246,6 +246,24 @@ in
         '';
       };
 
+      # Path unit to watch for system rebuilds and trigger peerix rescan
+      systemd.paths.peerix-rescan = {
+        description = "Watch for NixOS rebuild to trigger peerix cache rescan";
+        wantedBy = [ "multi-user.target" ];
+        pathConfig = {
+          PathChanged = "/run/current-system";
+          Unit = "peerix-rescan.service";
+        };
+      };
+
+      systemd.services.peerix-rescan = {
+        description = "Trigger peerix cache rescan after NixOS rebuild";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.systemd}/bin/systemctl reload peerix.service";
+        };
+      };
+
       nix = {
         settings = {
           substituters = [
