@@ -10,12 +10,10 @@ logger = logging.getLogger("peerix.tracker_client")
 
 class TrackerClient:
 
-    def __init__(self, tracker_url: str, peer_id: str, local_port: int,
-                 libp2p_peer_id: t.Optional[str] = None):
+    def __init__(self, tracker_url: str, peer_id: str, local_port: int):
         self.tracker_url = tracker_url.rstrip("/")
         self.peer_id = peer_id
         self.local_port = local_port
-        self.libp2p_peer_id = libp2p_peer_id
         self._client: t.Optional[httpx.AsyncClient] = None
         self._package_hashes: t.List[str] = []  # Store path hashes to announce
 
@@ -44,8 +42,6 @@ class TrackerClient:
             "peer_id": self.peer_id,
             "port": self.local_port,
         }
-        if self.libp2p_peer_id:
-            payload["libp2p_peer_id"] = self.libp2p_peer_id
         if self._package_hashes:
             payload["packages"] = self._package_hashes
 

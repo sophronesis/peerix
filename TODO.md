@@ -9,3 +9,11 @@
 - [x] Add manual cache update trigger / peerix restart mechanism
   - Use `systemctl reload peerix` to trigger store rescan
   - Sends SIGHUP to trigger scan_and_publish + CID sync
+
+## Code Cleanup
+
+- [x] Remove WAN, both, libp2p, hybrid modes - keep only lan and ipfs
+  - Deleted: wan.py, libp2p_host.py, libp2p_dht.py, libp2p_store.py, libp2p_protocols.py
+  - Deleted: ipfs_compat.py, peer_identity.py, net_validation.py
+  - Deleted: nix/libp2p.nix
+  - Simplified: app.py, __main__.py, module.nix, flake.nix, overlay.nix, tracker_client.py
