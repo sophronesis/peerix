@@ -295,10 +295,9 @@ class IPFSStore(Store):
                     # Try upstream cache for narinfo
                     ni = await self._fetch_upstream_narinfo(hsh)
                 if ni:
-                    # Rewrite URL to use IPFS
-                    ipfs_url = f"ipfs/{cid}"
+                    # Rewrite URL to use IPFS CID (PrefixStore adds v5/ipfs/ prefix)
                     logger.info(f"Found {hsh} in IPFS: {cid}")
-                    return ni._replace(url=ipfs_url)
+                    return ni._replace(url=cid)
                 else:
                     # We know the CID but can't get narinfo
                     logger.debug(f"Have CID but no narinfo for {hsh}")
@@ -310,16 +309,17 @@ class IPFSStore(Store):
 
     async def nar(self, url: str) -> t.AsyncIterable[bytes]:
         """
-        Fetch NAR data, from IPFS if URL starts with ipfs/.
+        Fetch NAR data, from IPFS if URL is a CID.
 
         Args:
-            url: NAR URL (ipfs/{cid} or local path)
+            url: NAR URL (CID starting with Qm or local path)
 
         Returns:
             Async iterable of NAR data chunks
         """
-        if url.startswith("ipfs/"):
-            cid = url[5:]  # Remove "ipfs/" prefix
+        # Check if URL is an IPFS CID (starts with Qm for CIDv0 or bafy for CIDv1)
+        if url.startswith("Qm") or url.startswith("bafy"):
+            cid = url
             data = await self.get_from_ipfs(cid)
             if data is None:
                 raise FileNotFoundError(f"IPFS content not found: {cid}")
