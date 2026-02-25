@@ -286,23 +286,22 @@ class IPFSStore(Store):
             except Exception as e:
                 logger.debug(f"Tracker CID lookup failed for {hsh}: {e}")
 
-        # If we have a CID, check if content is available in IPFS
+        # If we have a CID, return narinfo pointing to IPFS
+        # Skip availability check - it's too slow (10s timeout) and causes nix to
+        # use cache.nixos.org instead. If NAR fetch fails, nix will fallback.
         if cid:
-            if await self.check_ipfs_has(cid):
-                # Try local store first for narinfo metadata
-                ni = await self.local_store.narinfo(hsh)
-                if ni is None:
-                    # Try upstream cache for narinfo
-                    ni = await self._fetch_upstream_narinfo(hsh)
-                if ni:
-                    # Rewrite URL to use IPFS CID (PrefixStore adds v5/ipfs/ prefix)
-                    logger.info(f"Found {hsh} in IPFS: {cid}")
-                    return ni._replace(url=cid)
-                else:
-                    # We know the CID but can't get narinfo
-                    logger.debug(f"Have CID but no narinfo for {hsh}")
+            # Try local store first for narinfo metadata
+            ni = await self.local_store.narinfo(hsh)
+            if ni is None:
+                # Try upstream cache for narinfo
+                ni = await self._fetch_upstream_narinfo(hsh)
+            if ni:
+                # Rewrite URL to use IPFS CID (PrefixStore adds v5/ipfs/ prefix)
+                logger.info(f"Found {hsh} in IPFS: {cid}")
+                return ni._replace(url=cid)
             else:
-                logger.debug(f"CID {cid} not available in IPFS network")
+                # We know the CID but can't get narinfo
+                logger.debug(f"Have CID but no narinfo for {hsh}")
 
         # Fall back to local store
         return await self.local_store.narinfo(hsh)
