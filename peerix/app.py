@@ -522,7 +522,8 @@ async def pull_ipfs_nar(req: Request) -> Response:
         return Response(content="IPFS mode not enabled", status_code=404)
     try:
         async def stream_nar():
-            async for chunk in ipfs_access["store"].nar(req.path_params['path']):
+            # Prepend ipfs/ prefix for nar() method
+            async for chunk in ipfs_access["store"].nar(f"ipfs/{req.path_params['path']}"):
                 yield chunk
         return StreamingResponse(stream_nar(), media_type="text/plain")
     except FileNotFoundError:
