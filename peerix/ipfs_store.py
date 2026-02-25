@@ -438,6 +438,9 @@ class IPFSStore(Store):
                 else:
                     skipped += 1
 
+                # Yield to other tasks (heartbeat) to prevent starvation
+                await trio.sleep(0)
+
             except Exception as e:
                 logger.debug(f"Failed to process {hsh}: {e}")
                 skipped += 1
