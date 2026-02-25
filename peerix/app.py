@@ -27,6 +27,7 @@ r_access = None
 w_access = None
 p2p_access = None  # LibP2P store access
 ipfs_access = None  # IPFS store access
+cache_priority = 5  # Default cache priority (lower = higher priority)
 
 
 @contextlib.asynccontextmanager
@@ -50,8 +51,11 @@ async def setup_stores(
     enable_ipfs_compat: bool = False,
     # IPFS scan options
     scan_interval: int = 3600,
+    # Cache options
+    priority: int = 5,
 ):
-    global l_access, r_access, w_access, p2p_access, ipfs_access
+    global l_access, r_access, w_access, p2p_access, ipfs_access, cache_priority
+    cache_priority = priority
     w_access = None
     p2p_access = None
     ipfs_access = None
@@ -432,7 +436,7 @@ app = Starlette()
 @app.route("/nix-cache-info")
 async def cache_info(_: Request) -> Response:
     ci = await l_access.cache_info()
-    ci = ci._replace(priority=5)  # Lower number = higher priority (default cache.nixos.org is 10)
+    ci = ci._replace(priority=cache_priority)  # Lower number = higher priority (default cache.nixos.org is 10)
     return Response(content=ci.dump())
 
 

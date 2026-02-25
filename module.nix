@@ -234,6 +234,41 @@ in
           Default: 3600 (1 hour).
         '';
       };
+
+      # Cache options
+      priority = lib.mkOption {
+        type = types.int;
+        default = 5;
+        description = ''
+          Cache priority for nix substituters.
+          Lower number = higher priority.
+          Default: 5 (higher priority than cache.nixos.org which is 10).
+        '';
+      };
+
+      # IPFS module options
+      ipfs = {
+        enable = lib.mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Enable IPFS integration for peerix.
+            When enabled, peerix will use IPFS mode by default and
+            configure the local IPFS daemon (kubo) with recommended settings.
+            Set to false to use peerix without IPFS features.
+          '';
+        };
+
+        configureKubo = lib.mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Whether to configure kubo (IPFS daemon) with recommended settings.
+            Enables services.kubo and sets experimental features.
+            Set to false if you want to manage kubo configuration yourself.
+          '';
+        };
+      };
     };
 
     # Tracker service (separate top-level for clarity)
@@ -346,6 +381,8 @@ in
           ipfsCompatArgs = lib.optionalString cfg.enableIpfsCompat "--enable-ipfs-compat";
           # IPFS scan args
           scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
+          # Cache args
+          priorityArgs = "--priority ${toString cfg.priority}";
           # Use Python directly with -m to avoid wrapper script access issues with PrivateUsers
           pythonEnv = pkgs.peerix-python;
           peerixPkg = pkgs.peerix-full-unwrapped;
@@ -368,7 +405,8 @@ in
             ${listenAddrsArgs} \
             ${identityFileArgs} \
             ${ipfsCompatArgs} \
-            ${scanIntervalArgs}
+            ${scanIntervalArgs} \
+            ${priorityArgs}
         '';
       };
 
@@ -393,6 +431,29 @@ in
         allowedTCPPorts = [ 12304 13304 ];
         allowedUDPPorts = [ 12304 ];
       };
+    })
+
+    # IPFS/Kubo configuration when ipfs.configureKubo is enabled
+    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.configureKubo) {
+      services.kubo = {
+        enable = true;
+        settings = {
+          # Enable experimental features needed for peerix
+          Experimental = {
+            AcceleratedDHTClient = true;
+          };
+          # API access for peerix
+          API = {
+            HTTPHeaders = {
+              "Access-Control-Allow-Origin" = [ "*" ];
+            };
+          };
+        };
+      };
+
+      # Ensure peerix starts after kubo
+      systemd.services.peerix.after = [ "ipfs.service" ];
+      systemd.services.peerix.wants = [ "ipfs.service" ];
     })
 
     (lib.mkIf (tcfg.enable) {

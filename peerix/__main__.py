@@ -52,6 +52,10 @@ parser.add_argument("--enable-ipfs-compat", action="store_true",
 parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
 
+# Cache options
+parser.add_argument("--priority", type=int, default=5,
+                    help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
+
 # Verification options
 parser.add_argument("--no-verify", action="store_true",
                     help="Disable hash verification against upstream cache")
@@ -133,6 +137,8 @@ async def main(args):
         enable_ipfs_compat=args.enable_ipfs_compat,
         # IPFS scan options
         scan_interval=args.scan_interval,
+        # Cache options
+        priority=args.priority,
     ):
         await serve(app, config)
 
