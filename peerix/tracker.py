@@ -397,6 +397,69 @@ def create_tracker_app(db_path: str) -> Starlette:
             "score": round(score, 4),
         })
 
+    @app.route("/packages/batch", methods=["POST"])
+    async def batch_register_packages(req: Request) -> Response:
+        """Register many package hashes at once for a peer."""
+        body = await req.json()
+        peer_id = body.get("peer_id")
+        hashes = body.get("hashes", [])
+
+        if not peer_id:
+            return JSONResponse({"error": "peer_id required"}, status_code=400)
+
+        if not isinstance(hashes, list):
+            return JSONResponse({"error": "hashes must be a list"}, status_code=400)
+
+        now = time.time()
+
+        # Clear old entries for this peer and insert new ones
+        conn.execute("DELETE FROM packages WHERE peer_id = ?", (peer_id,))
+        if hashes:
+            conn.executemany(
+                "INSERT INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
+                [(h, peer_id, now) for h in hashes]
+            )
+        conn.commit()
+
+        logger.info(f"Batch register: peer {peer_id} registered {len(hashes)} packages")
+        return JSONResponse({"status": "ok", "count": len(hashes)})
+
+    @app.route("/packages/delta", methods=["POST"])
+    async def delta_sync_packages(req: Request) -> Response:
+        """Sync only added/removed package hashes for a peer."""
+        body = await req.json()
+        peer_id = body.get("peer_id")
+        added = body.get("added", [])
+        removed = body.get("removed", [])
+
+        if not peer_id:
+            return JSONResponse({"error": "peer_id required"}, status_code=400)
+
+        if not isinstance(added, list) or not isinstance(removed, list):
+            return JSONResponse({"error": "added and removed must be lists"}, status_code=400)
+
+        now = time.time()
+
+        # Remove the specified hashes
+        if removed:
+            placeholders = ",".join("?" * len(removed))
+            conn.execute(
+                f"DELETE FROM packages WHERE peer_id = ? AND hash IN ({placeholders})",
+                [peer_id] + removed
+            )
+
+        # Add the new hashes
+        if added:
+            conn.executemany(
+                "INSERT OR REPLACE INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
+                [(h, peer_id, now) for h in added]
+            )
+
+        conn.commit()
+
+        logger.info(f"Delta sync: peer {peer_id} added {len(added)}, removed {len(removed)}")
+        return JSONResponse({"status": "ok", "added": len(added), "removed": len(removed)})
+
     return app
 
 

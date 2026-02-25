@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import fnmatch
+import uuid
 
 import httpx
 import trio
@@ -186,6 +187,50 @@ class IPFSStore(Store):
             logger.warning(f"IPFS add error: {e}")
             return None
 
+    async def add_to_ipfs_streaming(self, data_stream: t.AsyncIterable[bytes]) -> t.Optional[str]:
+        """
+        Stream data directly to IPFS without buffering entire content in memory.
+
+        Args:
+            data_stream: Async iterable yielding data chunks
+
+        Returns:
+            CID string if successful, None otherwise
+        """
+        try:
+            client = await self._get_client()
+            boundary = f"----peerix-{uuid.uuid4().hex}"
+
+            async def body_generator():
+                # Multipart header
+                yield f"--{boundary}\r\n".encode()
+                yield b'Content-Disposition: form-data; name="file"; filename="nar"\r\n'
+                yield b"Content-Type: application/octet-stream\r\n\r\n"
+                # Stream the actual data
+                async for chunk in data_stream:
+                    yield chunk
+                # Multipart footer
+                yield f"\r\n--{boundary}--\r\n".encode()
+
+            headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+            resp = await client.post(
+                f"{self.api_url}/add",
+                content=body_generator(),
+                headers=headers,
+                params={"quiet": "true", "pin": "true"},
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                cid = result.get("Hash")
+                logger.debug(f"Streamed to IPFS: {cid}")
+                return cid
+            else:
+                logger.warning(f"IPFS streaming add failed: {resp.status_code}")
+                return None
+        except Exception as e:
+            logger.warning(f"IPFS streaming add error: {e}")
+            return None
+
     async def get_from_ipfs(self, cid: str) -> t.Optional[bytes]:
         """
         Get data from IPFS by CID.
@@ -210,6 +255,46 @@ class IPFSStore(Store):
                 return None
         except Exception as e:
             logger.debug(f"IPFS fetch error for {cid}: {e}")
+            return None
+
+    async def get_from_ipfs_streaming(self, cid: str) -> t.Optional[t.AsyncIterable[bytes]]:
+        """
+        Stream data from IPFS by CID without buffering entire content.
+
+        Args:
+            cid: The content ID to fetch
+
+        Returns:
+            Async iterable of data chunks if successful, None otherwise
+        """
+        try:
+            client = await self._get_client()
+            # Use stream=True for streaming response
+            async with client.stream(
+                "POST",
+                f"{self.api_url}/cat",
+                params={"arg": cid},
+            ) as resp:
+                if resp.status_code != 200:
+                    logger.debug(f"IPFS cat failed for {cid}: {resp.status_code}")
+                    return None
+
+                async def stream_chunks():
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        yield chunk
+
+                # We need to consume within the context manager, so collect and yield
+                chunks = []
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    chunks.append(chunk)
+
+                async def yield_chunks():
+                    for chunk in chunks:
+                        yield chunk
+
+                return yield_chunks()
+        except Exception as e:
+            logger.debug(f"IPFS streaming fetch error for {cid}: {e}")
             return None
 
     async def check_ipfs_has(self, cid: str) -> bool:
@@ -334,7 +419,10 @@ class IPFSStore(Store):
 
     async def publish_nar(self, hsh: str) -> t.Optional[str]:
         """
-        Publish a NAR to IPFS and cache the CID mapping.
+        Publish a NAR to IPFS using streaming upload.
+
+        Streams the NAR directly to IPFS without buffering the entire
+        content in memory.
 
         Args:
             hsh: The store path hash
@@ -351,29 +439,18 @@ class IPFSStore(Store):
         if ni is None:
             return None
 
-        # Collect NAR data
-        nar_data = b""
+        # Stream NAR data directly to IPFS
         try:
-            async for chunk in await self.local_store.nar(ni.url):
-                nar_data += chunk
+            nar_stream = await self.local_store.nar(ni.url)
+            cid = await self.add_to_ipfs_streaming(nar_stream)
         except Exception as e:
-            logger.warning(f"Failed to read NAR for {hsh}: {e}")
+            logger.warning(f"Failed to stream NAR for {hsh}: {e}")
             return None
 
-        # Add to IPFS
-        cid = await self.add_to_ipfs(nar_data)
         if cid:
             self._cid_cache[hsh] = cid
             self._save_cache()
             logger.info(f"Published {hsh} to IPFS: {cid}")
-
-            # Register with tracker
-            if self.tracker_client is not None:
-                try:
-                    await self.tracker_client.register_cid(hsh, cid)
-                    logger.debug(f"Registered CID with tracker: {hsh} -> {cid}")
-                except Exception as e:
-                    logger.warning(f"Failed to register CID with tracker: {e}")
 
         return cid
 
@@ -389,93 +466,102 @@ class IPFSStore(Store):
     async def scan_and_publish(
         self,
         extra_patterns: t.List[str] = None,
+        concurrency: int = 10,
     ) -> t.Tuple[int, int]:
         """
         Scan local nix store and publish applicable packages to IPFS.
 
         Scans all store paths (after filtering sensitive packages).
+        Uploads are parallelized with configurable concurrency.
 
         Args:
             extra_patterns: Additional fnmatch patterns to exclude
+            concurrency: Maximum number of parallel IPFS uploads (default: 10)
 
         Returns:
             Tuple of (published_count, skipped_count)
         """
-        logger.info("Scanning nix store for IPFS publishing (all paths)...")
+        logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency})...")
 
         # Get all store paths
         store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
-        published = 0
-        skipped = 0
-        already_cached = 0
+        # Counters (safe since trio is single-threaded)
+        counters = {"published": 0, "skipped": 0, "already_cached": 0}
+        semaphore = trio.Semaphore(concurrency)
 
-        for hsh in store_hashes:
-            # Skip if already in cache
+        async def publish_one(hsh: str) -> None:
+            """Publish a single store path to IPFS."""
+            # Skip if already in cache (check before acquiring semaphore)
             if hsh in self._cid_cache:
-                already_cached += 1
-                continue
+                counters["already_cached"] += 1
+                return
 
-            # Get narinfo to check store path name
-            try:
-                ni = await self.local_store.narinfo(hsh)
-                if ni is None:
-                    skipped += 1
-                    continue
+            async with semaphore:
+                # Double-check cache (another task might have added it)
+                if hsh in self._cid_cache:
+                    counters["already_cached"] += 1
+                    return
 
-                # Check exclusion patterns
-                if self._is_excluded(ni.storePath, extra_patterns):
-                    logger.debug(f"Excluded: {ni.storePath}")
-                    skipped += 1
-                    continue
+                try:
+                    ni = await self.local_store.narinfo(hsh)
+                    if ni is None:
+                        counters["skipped"] += 1
+                        return
 
-                # Publish to IPFS
-                cid = await self.publish_nar(hsh)
-                if cid:
-                    published += 1
-                    logger.debug(f"Published {hsh} -> {cid}")
-                else:
-                    skipped += 1
+                    # Check exclusion patterns
+                    if self._is_excluded(ni.storePath, extra_patterns):
+                        logger.debug(f"Excluded: {ni.storePath}")
+                        counters["skipped"] += 1
+                        return
 
-                # Yield to other tasks (heartbeat) to prevent starvation
-                await trio.sleep(0)
+                    # Publish to IPFS
+                    cid = await self.publish_nar(hsh)
+                    if cid:
+                        counters["published"] += 1
+                        logger.debug(f"Published {hsh} -> {cid}")
+                    else:
+                        counters["skipped"] += 1
 
-            except Exception as e:
-                logger.debug(f"Failed to process {hsh}: {e}")
-                skipped += 1
+                except Exception as e:
+                    logger.debug(f"Failed to process {hsh}: {e}")
+                    counters["skipped"] += 1
+
+        # Process all hashes in parallel with limited concurrency
+        async with trio.open_nursery() as nursery:
+            for hsh in store_hashes:
+                nursery.start_soon(publish_one, hsh)
 
         logger.info(
-            f"Store scan complete: {published} published, {skipped} skipped, "
-            f"{already_cached} already cached"
+            f"Store scan complete: {counters['published']} published, "
+            f"{counters['skipped']} skipped, {counters['already_cached']} already cached"
         )
-        return published, skipped
+        return counters["published"], counters["skipped"]
 
     async def run_periodic_scan(
         self,
         interval: float = DEFAULT_SCAN_INTERVAL,
         extra_patterns: t.List[str] = None,
+        concurrency: int = 10,
     ) -> None:
         """
         Run periodic store scanning in background.
 
         Scans all store paths (no limit), filters sensitive packages,
-        publishes to IPFS, and syncs CID mappings to tracker.
+        and publishes to IPFS. Package hash sync is handled separately
+        via delta sync in app.py.
 
         Args:
             interval: Seconds between scans (default: 3600 = 1 hour)
             extra_patterns: Additional exclusion patterns
+            concurrency: Maximum number of parallel IPFS uploads (default: 10)
         """
-        logger.info(f"Starting periodic IPFS store scan (interval={interval}s, no limit)")
+        logger.info(f"Starting periodic IPFS store scan (interval={interval}s, concurrency={concurrency})")
 
         while True:
             try:
-                published, skipped = await self.scan_and_publish(extra_patterns)
-
-                # Always sync all mappings to tracker after scan
-                if self.tracker_client is not None:
-                    await self.sync_cid_mappings_to_tracker()
-
+                published, skipped = await self.scan_and_publish(extra_patterns, concurrency)
             except Exception as e:
                 logger.warning(f"Periodic scan failed: {e}")
 

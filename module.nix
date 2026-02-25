@@ -109,6 +109,16 @@ in
         '';
       };
 
+      ipfsConcurrency = lib.mkOption {
+        type = types.int;
+        default = 10;
+        description = ''
+          Number of parallel IPFS uploads during store scanning.
+          Higher values speed up initial sync but use more resources.
+          Default: 10.
+        '';
+      };
+
       # Cache options
       priority = lib.mkOption {
         type = types.int;
@@ -235,6 +245,7 @@ in
           modeArgs = "--mode ${cfg.mode}";
           trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
           scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
+          concurrencyArgs = "--ipfs-concurrency ${toString cfg.ipfsConcurrency}";
           priorityArgs = "--priority ${toString cfg.priority}";
         in ''
           export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
@@ -242,6 +253,7 @@ in
             ${modeArgs} \
             ${trackerArgs} \
             ${scanIntervalArgs} \
+            ${concurrencyArgs} \
             ${priorityArgs}
         '';
       };

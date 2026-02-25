@@ -42,6 +42,8 @@ parser.add_argument("--tracker-url", default=None,
                     help="URL of the peerix tracker for CID registry (used in IPFS mode)")
 parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
+parser.add_argument("--ipfs-concurrency", type=int, default=10,
+                    help="Number of parallel IPFS uploads (default: 10)")
 
 # Cache options
 parser.add_argument("--priority", type=int, default=5,
@@ -64,11 +66,11 @@ async def handle_sighup():
     logger.info("Received SIGHUP, triggering manual store rescan...")
     if ipfs_access is not None and "store" in ipfs_access:
         try:
-            published, skipped = await ipfs_access["store"].scan_and_publish()
+            concurrency = ipfs_access.get("concurrency", 10)
+            published, skipped = await ipfs_access["store"].scan_and_publish(
+                concurrency=concurrency
+            )
             logger.info(f"Manual rescan complete: {published} published, {skipped} skipped")
-            # Sync to tracker after manual scan
-            if ipfs_access.get("tracker_client") is not None:
-                await ipfs_access["store"].sync_cid_mappings_to_tracker()
         except Exception as e:
             logger.error(f"Manual rescan failed: {e}")
     else:
@@ -92,6 +94,7 @@ async def main(args):
         mode=args.mode,
         tracker_url=args.tracker_url,
         scan_interval=args.scan_interval,
+        ipfs_concurrency=args.ipfs_concurrency,
         priority=args.priority,
     ):
         async with trio.open_nursery() as nursery:

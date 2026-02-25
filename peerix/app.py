@@ -40,6 +40,7 @@ async def setup_stores(
     peer_id: str = None,
     # IPFS scan options
     scan_interval: int = 3600,
+    ipfs_concurrency: int = 10,
     # Cache options
     priority: int = 5,
 ):
@@ -62,27 +63,26 @@ async def setup_stores(
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
                 no_filter, filter_patterns, no_default_filters, peer_id,
-                scan_interval,
+                scan_interval, ipfs_concurrency,
             )
             ipfs_access = ipfs_info
             try:
-                # Start background tasks: heartbeat, CID sync, and periodic scan
+                # Start background tasks: heartbeat, delta sync, and periodic scan
                 async with trio.open_nursery() as nursery:
                     ipfs_info["_nursery"] = nursery
                     # Start tracker heartbeat if tracker is configured
                     tracker_client = ipfs_info.get("tracker_client")
                     if tracker_client is not None:
                         nursery.start_soon(tracker_client.run_heartbeat)
-                        # Sync CID mappings in background (non-blocking)
-                        nursery.start_soon(
-                            ipfs_info["store"].sync_cid_mappings_to_tracker
-                        )
+                        # Start periodic delta sync (every 5 minutes)
+                        nursery.start_soon(_run_periodic_delta_sync, tracker_client, 300)
                     # Start periodic scan if enabled
                     if scan_interval > 0:
                         nursery.start_soon(
                             ipfs_info["store"].run_periodic_scan,
                             scan_interval,
                             filter_patterns,
+                            ipfs_concurrency,
                         )
                     yield
                     nursery.cancel_scope.cancel()
@@ -91,9 +91,40 @@ async def setup_stores(
                 ipfs_access = None
 
 
+async def _run_periodic_delta_sync(tracker_client: TrackerClient, interval: float):
+    """
+    Run periodic delta sync of store path hashes to tracker.
+
+    Scans the local store and sends only added/removed hashes since last sync.
+
+    Args:
+        tracker_client: The tracker client to sync with
+        interval: Seconds between syncs
+    """
+    logger.info(f"Starting periodic delta sync (interval={interval}s)")
+
+    # Do initial sync immediately
+    try:
+        store_hashes = scan_store_paths(limit=0)
+        current_hashes = set(store_hashes)
+        await tracker_client.delta_sync_packages(current_hashes)
+        logger.info(f"Initial delta sync: {len(current_hashes)} packages")
+    except Exception as e:
+        logger.warning(f"Initial delta sync failed: {e}")
+
+    while True:
+        await trio.sleep(interval)
+        try:
+            store_hashes = scan_store_paths(limit=0)
+            current_hashes = set(store_hashes)
+            await tracker_client.delta_sync_packages(current_hashes)
+        except Exception as e:
+            logger.warning(f"Delta sync failed: {e}")
+
+
 async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
                       no_filter, filter_patterns, no_default_filters, peer_id,
-                      scan_interval=3600):
+                      scan_interval=3600, ipfs_concurrency=10):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
 
@@ -113,16 +144,11 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
             use_defaults=not no_default_filters,
         )
 
-    # Create tracker client for CID lookups
+    # Create tracker client for package lookups
     tracker_client = None
     if tracker_url:
         tracker_client = TrackerClient(tracker_url, peer_id, local_port)
-        # Scan and announce store paths
-        logger.info("Scanning local store paths for tracker announcement...")
-        store_hashes = scan_store_paths(limit=0)
-        tracker_client.set_package_hashes(store_hashes)
-        logger.info(f"Will announce {len(store_hashes)} store paths to tracker")
-        # Do initial announce
+        # Do initial announce (without packages - delta sync handles that)
         try:
             await tracker_client.announce()
             logger.info(f"Announced to tracker as peer {peer_id}")
@@ -132,7 +158,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
     ipfs_store = IPFSStore(serving_store, tracker_client=tracker_client)
     ipfs_prefix = PrefixStore("v5/ipfs", ipfs_store)
 
-    # Note: CID sync moved to background task to avoid blocking startup
+    # Note: Delta sync moved to background task to avoid blocking startup
     logger.info("IPFS store initialized" + (" with tracker" if tracker_client else ""))
 
     return {
@@ -141,6 +167,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
         "verified_store": verified_store,
         "serving_store": serving_store,
         "tracker_client": tracker_client,
+        "concurrency": ipfs_concurrency,
     }
 
 

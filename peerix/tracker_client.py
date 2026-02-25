@@ -1,5 +1,7 @@
 import typing as t
 import logging
+import json
+import os
 
 import trio
 import httpx
@@ -7,20 +9,127 @@ import httpx
 
 logger = logging.getLogger("peerix.tracker_client")
 
+# Default path for persisting announced state
+DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
+
 
 class TrackerClient:
 
-    def __init__(self, tracker_url: str, peer_id: str, local_port: int):
+    def __init__(self, tracker_url: str, peer_id: str, local_port: int,
+                 state_file: str = DEFAULT_STATE_FILE):
         self.tracker_url = tracker_url.rstrip("/")
         self.peer_id = peer_id
         self.local_port = local_port
         self._client: t.Optional[httpx.AsyncClient] = None
         self._package_hashes: t.List[str] = []  # Store path hashes to announce
+        self._state_file = state_file
+        self._last_announced_hashes: t.Set[str] = set()
+        self._load_announced_state()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient()
         return self._client
+
+    def _load_announced_state(self) -> None:
+        """Load the set of previously announced hashes from disk."""
+        try:
+            if os.path.exists(self._state_file):
+                with open(self._state_file, "r") as f:
+                    data = json.load(f)
+                    self._last_announced_hashes = set(data.get("hashes", []))
+                    logger.info(f"Loaded {len(self._last_announced_hashes)} announced hashes from state")
+        except Exception as e:
+            logger.warning(f"Failed to load announced state: {e}")
+            self._last_announced_hashes = set()
+
+    def _save_announced_state(self) -> None:
+        """Save the set of announced hashes to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            with open(self._state_file, "w") as f:
+                json.dump({"hashes": list(self._last_announced_hashes)}, f)
+        except Exception as e:
+            logger.warning(f"Failed to save announced state: {e}")
+
+    async def batch_register_packages(self, hashes: t.List[str]) -> bool:
+        """
+        Register many package hashes at once with the tracker.
+
+        Args:
+            hashes: List of store path hashes to register
+
+        Returns:
+            True if successful
+        """
+        client = await self._get_client()
+        try:
+            resp = await client.post(
+                f"{self.tracker_url}/packages/batch",
+                json={"peer_id": self.peer_id, "hashes": hashes},
+                timeout=60.0,
+            )
+            if resp.status_code == 200:
+                self._last_announced_hashes = set(hashes)
+                self._save_announced_state()
+                logger.info(f"Batch registered {len(hashes)} packages with tracker")
+                return True
+            else:
+                logger.warning(f"Batch register failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            logger.warning(f"Batch register error: {e}")
+            return False
+
+    async def delta_sync_packages(self, current_hashes: t.Set[str]) -> bool:
+        """
+        Sync package hashes with tracker using delta updates.
+
+        Only sends added/removed hashes since last sync. Falls back to
+        batch register if this is the first sync.
+
+        Args:
+            current_hashes: Current set of store path hashes
+
+        Returns:
+            True if successful
+        """
+        # First sync - send all hashes
+        if not self._last_announced_hashes:
+            logger.info("First sync, sending all hashes via batch register")
+            return await self.batch_register_packages(list(current_hashes))
+
+        # Compute delta
+        added = current_hashes - self._last_announced_hashes
+        removed = self._last_announced_hashes - current_hashes
+
+        # Nothing changed
+        if not added and not removed:
+            logger.debug("No package changes, skipping delta sync")
+            return True
+
+        client = await self._get_client()
+        try:
+            resp = await client.post(
+                f"{self.tracker_url}/packages/delta",
+                json={
+                    "peer_id": self.peer_id,
+                    "added": list(added),
+                    "removed": list(removed),
+                },
+                timeout=60.0,
+            )
+            if resp.status_code == 200:
+                self._last_announced_hashes = current_hashes.copy()
+                self._save_announced_state()
+                logger.info(f"Delta sync: +{len(added)} -{len(removed)} packages")
+                return True
+            else:
+                logger.warning(f"Delta sync failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            logger.warning(f"Delta sync error: {e}")
+            return False
 
     async def run_heartbeat(self, task_status=trio.TASK_STATUS_IGNORED):
         """Run the heartbeat loop. Should be called from within a nursery."""

@@ -45,13 +45,13 @@ def compute_store_hash() -> str:
         return ""
 
 
-def scan_store_paths(limit: int = 1000, skip_derivations: bool = True) -> t.List[str]:
+def scan_store_paths(limit: int = 1000, skip_derivations: bool = False) -> t.List[str]:
     """
     Scan the local nix store and return a list of store path hashes.
 
     Args:
         limit: Maximum number of paths to return (0 = unlimited)
-        skip_derivations: If True, skip .drv files (default: True)
+        skip_derivations: If True, skip .drv files (default: False)
 
     Returns:
         List of 32-character store path hashes

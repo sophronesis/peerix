@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Peerix is a peer-to-peer binary cache for Nix. It supports two discovery modes:
-- **IPFS** (default): Uses local IPFS daemon for content-addressed NAR distribution. CID mappings registered with tracker. On startup, all local NarHash→CID mappings are synced to tracker.
+- **IPFS** (default): Uses local IPFS daemon for content-addressed NAR distribution. Package hashes are synced to tracker using delta updates (only changed hashes sent after initial sync). NARs are streamed directly to IPFS without buffering in memory.
 - **LAN**: UDP broadcast for zero-config peer discovery on local networks.
 
 ## Build & Run
@@ -50,27 +50,29 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **`store.py`** — Base `Store` class and data models (`NarInfo`, `CacheInfo` NamedTuples with `parse()`/`dump()` serialization). All stores implement `cache_info()`, `narinfo(hash)`, and `nar(url)`. The `NarInfo.parse()` skips lines without `:` to handle empty lines gracefully.
 - **`local.py`** — `LocalStore`: launches `nix-serve` on a Unix socket, proxies narinfo requests to it, and streams NARs via `nix-store --dump`. The `local()` context manager handles the nix-serve subprocess lifecycle. Important: `NIX_SECRET_KEY_FILE` is stripped from nix-serve's env to avoid Perl crashes — signing is handled by peerix itself in `app.py`. Path traversal protection via `os.path.realpath()` + trailing-slash check.
 - **`remote.py`** — `DiscoveryProtocol`: a UDP datagram protocol that broadcasts narinfo requests to all private-network broadcast addresses, waits for peer responses (with configurable timeout), then fetches narinfo/NAR data over HTTP from the responding peer. Uses random 4-byte request IDs (anti-spoofing).
-- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry (announce/heartbeat), peer listing, and CID mappings for IPFS mode.
-- **`tracker_client.py`** — Client for the tracker. Handles heartbeat announcements, peer listing, CID lookups and registration.
+- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry (announce/heartbeat), peer listing, package hash registry (batch and delta sync endpoints), and CID mappings for IPFS mode.
+- **`tracker_client.py`** — Client for the tracker. Handles heartbeat announcements, peer listing, delta sync of package hashes (persists state to `/var/lib/peerix/announced_state.json`), CID lookups and registration.
 - **`prefix.py`** — `PrefixStore`: decorator that namespaces URL paths so local, remote, and IPFS NAR routes don't collide.
 - **`filtered.py`** — `FilteredStore`: heuristic filtering of system-specific/sensitive derivations.
 - **`verified.py`** — `VerifiedStore`: verifies store path hashes against upstream cache. Caches expected `narHash` per URL and verifies NAR content on-the-fly during streaming (TOCTOU protection) using SHA256 + Nix base32 encoding.
 - **`app.py`** — Starlette routes wiring it together. `setup_stores()` initializes stores based on mode. Narinfo endpoint (`/{hash}.narinfo`) is restricted to localhost (IPv4 and IPv6). Routes: `/local/` for peer-to-peer, `/v2/remote/` for LAN, `/v5/ipfs/` for IPFS.
-- **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--scan-interval`, `--priority`.
+- **`__main__.py`** — CLI entry point: argparse for `--port`, `--timeout`, `--verbose`, `--private-key`, `--mode`, `--tracker-url`, `--scan-interval`, `--ipfs-concurrency`, `--priority`.
 
 ### IPFS module (`peerix/`)
 
-- **`ipfs_store.py`** — `IPFSStore`: Store implementation using local IPFS daemon. Adds NARs to IPFS via `/api/v0/add`, retrieves via `/api/v0/cat`. Maintains local CID cache at `/var/lib/peerix/cid_cache.json`. Key methods:
-  - `add_to_ipfs()`, `get_from_ipfs()`, `check_ipfs_has()`: IPFS daemon interaction
-  - `publish_nar()`: Publish single NAR to IPFS and cache mapping
-  - `sync_cid_mappings_to_tracker()`: Register all local CID mappings with tracker (called on startup)
-  - `scan_and_publish()`: Scan store paths, filter, and publish to IPFS
-  - `run_periodic_scan()`: Background task that periodically scans and publishes (configurable interval, default 1 hour)
+- **`ipfs_store.py`** — `IPFSStore`: Store implementation using local IPFS daemon. Adds NARs to IPFS via `/api/v0/add` (streaming), retrieves via `/api/v0/cat`. Maintains local CID cache at `/var/lib/peerix/cid_cache.json`. Key methods:
+  - `add_to_ipfs()`, `add_to_ipfs_streaming()`: Add data to IPFS (streaming version doesn't buffer in memory)
+  - `get_from_ipfs()`, `get_from_ipfs_streaming()`: Fetch data from IPFS
+  - `check_ipfs_has()`: Check content availability via routing/findprovs
+  - `publish_nar()`: Publish single NAR to IPFS using streaming upload
+  - `scan_and_publish()`: Scan store paths (including .drv files), filter, and publish to IPFS in parallel (configurable concurrency, default 10)
+  - `run_periodic_scan()`: Background task that periodically scans and publishes (configurable interval and concurrency)
+- **`store_scanner.py`** — Scans `/nix/store` for path hashes. Includes `.drv` files by default. Caches scan results based on store directory hash.
 
 ### Network protocol
 
 - **LAN**: UDP port 12304 (configurable) — peer discovery via broadcast. Packet byte 0 is message type (0=request, 1=response), bytes 1-4 are request ID.
-- **IPFS**: Uses local IPFS daemon API (`http://127.0.0.1:5001/api/v0`). NARs are added via `/add` and fetched via `/cat`. CID mappings registered with tracker via `POST /cid` and looked up via `GET /cid/{nar_hash}`. Uses `routing/findprovs` to check content availability. NAR URLs use `ipfs/{cid}` format.
+- **IPFS**: Uses local IPFS daemon API (`http://127.0.0.1:5001/api/v0`). NARs are streamed to IPFS via `/add` (multipart, no memory buffering) and fetched via `/cat`. Package hashes synced with tracker via `POST /packages/batch` (initial) and `POST /packages/delta` (subsequent). CID mappings still available via `POST /cid` and `GET /cid/{nar_hash}`. Uses `routing/findprovs` to check content availability. NAR URLs use `ipfs/{cid}` format.
 - **HTTP port 12304** (configurable): serves local narinfo/NAR to peers and proxied remote content to the local nix daemon.
 
 ### NixOS integration
@@ -87,7 +89,8 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **`/{hash}.narinfo` is restricted to 127.0.0.1**: External peers must use `/local/{hash}.narinfo` instead. This is by design — the main narinfo endpoint is for the local nix daemon only.
 - **`nix-build --option require-sigs false`**: Even with `trusted-users`, this may not work in all nix versions. Prefer proper signing with `NIX_SECRET_KEY_FILE` and `trusted-public-keys`.
 - **IPFS mode requires daemon**: The local IPFS daemon must be running (`ipfs daemon` or `services.kubo.enable`). API defaults to `http://127.0.0.1:5001/api/v0`.
-- **IPFS CID cache**: Stored at `/var/lib/peerix/cid_cache.json`. On startup, all local CID mappings are pre-registered with the tracker via `sync_cid_mappings_to_tracker()`.
+- **IPFS CID cache**: Stored at `/var/lib/peerix/cid_cache.json`. Maps NarHash to IPFS CID for local lookups.
+- **Delta sync state**: Stored at `/var/lib/peerix/announced_state.json`. Persists which package hashes have been announced to tracker, enabling efficient delta syncs across restarts.
 - **IPFS NAR URL format**: NARs fetched from IPFS use URL format `ipfs/{cid}`. The `IPFSStore.nar()` method handles both IPFS URLs and local store paths.
 - **IPFS findprovs API**: Uses `routing/findprovs` (new API, replacing deprecated `dht/findprovs`). Response is NDJSON; Type=4 indicates provider found.
 - **SIGHUP for manual rescan**: Send SIGHUP to trigger manual store rescan in IPFS mode. Use `systemctl reload peerix` on NixOS.
