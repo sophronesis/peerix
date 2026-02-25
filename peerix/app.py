@@ -432,7 +432,7 @@ app = Starlette()
 @app.route("/nix-cache-info")
 async def cache_info(_: Request) -> Response:
     ci = await l_access.cache_info()
-    ci = ci._replace(priority=20)
+    ci = ci._replace(priority=5)  # Lower number = higher priority (default cache.nixos.org is 10)
     return Response(content=ci.dump())
 
 
