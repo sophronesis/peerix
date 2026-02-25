@@ -355,7 +355,12 @@ in
           Environment = lib.mkIf (cfg.privateKeyFile != null) [
             "NIX_SECRET_KEY_FILE=${cfg.privateKeyFile}"
           ];
+
+          # Support reload to trigger manual cache rescan
+          ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         };
+        # Enable reload support
+        reloadIfChanged = true;
         script = let
           modeArgs = "--mode ${cfg.mode}";
           trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";

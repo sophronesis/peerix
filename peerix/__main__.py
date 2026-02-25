@@ -1,4 +1,5 @@
 import os
+import signal
 import logging
 import argparse
 import json
@@ -9,7 +10,7 @@ import trio
 from hypercorn import Config
 from hypercorn.trio import serve
 
-from peerix.app import app, setup_stores
+from peerix.app import app, setup_stores, ipfs_access
 
 
 logger = logging.getLogger("peerix.main")
@@ -113,6 +114,31 @@ def run():
     trio.run(main, args)
 
 
+async def handle_sighup(filter_patterns):
+    """Handle SIGHUP signal by triggering a manual store rescan."""
+    from peerix.app import ipfs_access
+
+    logger.info("Received SIGHUP, triggering manual store rescan...")
+    if ipfs_access is not None and "store" in ipfs_access:
+        try:
+            published, skipped = await ipfs_access["store"].scan_and_publish(filter_patterns)
+            logger.info(f"Manual rescan complete: {published} published, {skipped} skipped")
+            # Sync to tracker after manual scan
+            if ipfs_access.get("tracker_client") is not None:
+                await ipfs_access["store"].sync_cid_mappings_to_tracker()
+        except Exception as e:
+            logger.error(f"Manual rescan failed: {e}")
+    else:
+        logger.warning("SIGHUP received but IPFS mode not active, ignoring")
+
+
+async def signal_handler_task(filter_patterns):
+    """Background task to handle SIGHUP signals."""
+    with trio.open_signal_receiver(signal.SIGHUP) as signal_aiter:
+        async for signum in signal_aiter:
+            await handle_sighup(filter_patterns)
+
+
 async def main(args):
     config = Config()
     config.bind = [f"0.0.0.0:{args.port}"]
@@ -140,7 +166,12 @@ async def main(args):
         # Cache options
         priority=args.priority,
     ):
-        await serve(app, config)
+        async with trio.open_nursery() as nursery:
+            # Start SIGHUP handler for manual cache refresh
+            nursery.start_soon(signal_handler_task, args.filter_patterns)
+            # Run the HTTP server
+            await serve(app, config)
+            nursery.cancel_scope.cancel()
 
 
 if __name__ == "__main__":
