@@ -4,6 +4,7 @@ import logging
 import argparse
 
 import trio
+import psutil
 from hypercorn import Config
 from hypercorn.trio import serve
 
@@ -11,6 +12,20 @@ from peerix.app import app, setup_stores
 
 
 logger = logging.getLogger("peerix.main")
+
+
+async def memory_monitor_task(interval: int = 600):
+    """Log memory usage every interval seconds (default 10 min)."""
+    while True:
+        await trio.sleep(interval)
+        mem = psutil.virtual_memory()
+        proc = psutil.Process()
+        proc_mem = proc.memory_info()
+        logger.info(
+            f"Memory: system {mem.percent:.1f}% used "
+            f"({mem.used // 1024 // 1024}MB/{mem.total // 1024 // 1024}MB), "
+            f"peerix {proc_mem.rss // 1024 // 1024}MB RSS"
+        )
 
 parser = argparse.ArgumentParser(description="Peerix nix binary cache.")
 parser.add_argument("--verbose", action="store_const", const=logging.DEBUG, default=logging.INFO, dest="loglevel")
@@ -80,6 +95,8 @@ async def main(args):
         priority=args.priority,
     ):
         async with trio.open_nursery() as nursery:
+            # Start memory monitor (logs every 10 min)
+            nursery.start_soon(memory_monitor_task)
             # Start SIGHUP handler for manual cache refresh (IPFS mode)
             if args.mode == "ipfs":
                 nursery.start_soon(signal_handler_task)
