@@ -166,9 +166,10 @@ class IPFSStore(Store):
 
     def _reset_rate_tracking(self) -> None:
         """Reset EMA rate tracking for new scan."""
+        import time
         self._rate_ema = 0.0
         self._rate_last_processed = 0
-        self._rate_last_time = 0.0
+        self._rate_last_time = time.time()  # Initialize to now, not 0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
