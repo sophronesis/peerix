@@ -86,10 +86,10 @@ class IPFSStore(Store):
         self._pid_last_error: float = 0.0  # Previous error for derivative
         self._pid_last_time: float = 0.0  # Last update time
         self._pid_last_processed: int = 0  # Last processed count
-        # PID tuning parameters
-        self._pid_kp: float = 0.3
-        self._pid_ki: float = 0.05
-        self._pid_kd: float = 0.1
+        # PID tuning parameters (aggressive for fast adaptation)
+        self._pid_kp: float = 0.7
+        self._pid_ki: float = 0.15
+        self._pid_kd: float = 0.2
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
