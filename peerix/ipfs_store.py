@@ -222,9 +222,16 @@ class IPFSStore(Store):
         self._cache_dirty = True
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """Get or create HTTP client with connection pooling."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.fetch_timeout)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.fetch_timeout, connect=10.0),
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=30.0,
+                ),
+            )
         return self._client
 
     async def close(self) -> None:
@@ -426,6 +433,34 @@ class IPFSStore(Store):
         except Exception as e:
             logger.debug(f"Failed to fetch upstream narinfo for {hsh}: {e}")
             return None
+
+    async def batch_narinfo(
+        self,
+        hashes: t.List[str],
+        concurrency: int = 10,
+    ) -> t.Dict[str, t.Optional[NarInfo]]:
+        """
+        Fetch narinfo for multiple hashes in parallel.
+
+        Args:
+            hashes: List of store path hashes to look up
+            concurrency: Maximum parallel lookups (default: 10)
+
+        Returns:
+            Dict mapping hash to NarInfo (or None if not found)
+        """
+        results: t.Dict[str, t.Optional[NarInfo]] = {}
+        semaphore = trio.Semaphore(concurrency)
+
+        async def fetch_one(hsh: str) -> None:
+            async with semaphore:
+                results[hsh] = await self.narinfo(hsh)
+
+        async with trio.open_nursery() as nursery:
+            for hsh in hashes:
+                nursery.start_soon(fetch_one, hsh)
+
+        return results
 
     async def narinfo(self, hsh: str) -> t.Optional[NarInfo]:
         """

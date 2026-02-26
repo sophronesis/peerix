@@ -353,6 +353,28 @@ def create_tracker_app(db_path: str) -> Starlette:
         cids = {row[0]: row[1] for row in rows}
         return JSONResponse({"cids": cids, "count": len(cids)})
 
+    @app.route("/cids/batch", methods=["POST"])
+    async def batch_get_cids(req: Request) -> Response:
+        """Get CID mappings for multiple NarHashes in one request."""
+        body = await req.json()
+        nar_hashes = body.get("nar_hashes", [])
+
+        if not isinstance(nar_hashes, list):
+            return JSONResponse({"error": "nar_hashes must be a list"}, status_code=400)
+
+        if not nar_hashes:
+            return JSONResponse({"cids": {}})
+
+        # Batch lookup using IN clause
+        placeholders = ",".join("?" * len(nar_hashes))
+        rows = conn.execute(
+            f"SELECT nar_hash, cid FROM cid_mappings WHERE nar_hash IN ({placeholders})",
+            nar_hashes
+        ).fetchall()
+
+        cids = {row[0]: row[1] for row in rows}
+        return JSONResponse({"cids": cids, "count": len(cids)})
+
     @app.route("/cid", methods=["POST"])
     async def register_cid(req: Request) -> Response:
         """Register an IPFS CID for a NarHash."""

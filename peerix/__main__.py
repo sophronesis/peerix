@@ -11,6 +11,7 @@ from hypercorn import Config
 from hypercorn.trio import serve
 
 from peerix.app import app, setup_stores
+from peerix.config import load_config, merge_args_with_config
 
 
 logger = logging.getLogger("peerix.main")
@@ -124,6 +125,10 @@ def run():
     if args.command == "status":
         status_command(args)
         return
+
+    # Load config file and merge with CLI args (CLI takes precedence)
+    config = load_config()
+    merge_args_with_config(args, config)
 
     # Default: run the daemon (serve command or no command)
     if args.private_key is not None:

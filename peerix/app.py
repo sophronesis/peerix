@@ -277,3 +277,294 @@ async def scan_status(req: Request) -> Response:
 
     progress = ipfs_access["store"].get_scan_progress()
     return JSONResponse(progress)
+
+
+DASHBOARD_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>Peerix Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        h1 { margin-bottom: 24px; font-weight: 300; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            max-width: 1400px;
+        }
+        .card {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .card h2 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+            margin-bottom: 12px;
+        }
+        .value {
+            font-size: 36px;
+            font-weight: bold;
+            color: #00d9ff;
+        }
+        .value.success { color: #00ff88; }
+        .value.warning { color: #ffaa00; }
+        .value.error { color: #ff4444; }
+        .progress-bar {
+            background: #0f3460;
+            border-radius: 8px;
+            height: 8px;
+            margin-top: 12px;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #0f3460;
+        }
+        .status-row:last-child { border-bottom: none; }
+        .status-label { color: #888; }
+        .status-value { font-weight: 500; }
+        .mode-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 16px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .mode-badge.ipfs { background: #00d9ff33; color: #00d9ff; }
+        .mode-badge.lan { background: #00ff8833; color: #00ff88; }
+        .current-path {
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+            word-break: break-all;
+            font-family: monospace;
+        }
+        .error-msg {
+            background: #ff444433;
+            border: 1px solid #ff4444;
+            border-radius: 8px;
+            padding: 16px;
+            color: #ff4444;
+        }
+    </style>
+</head>
+<body>
+    <h1>Peerix Dashboard</h1>
+    <div id="error" class="error-msg" style="display: none; margin-bottom: 20px;"></div>
+    <div class="grid">
+        <div class="card">
+            <h2>Scan Progress</h2>
+            <div class="value" id="percent">--</div>
+            <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
+            <div class="current-path" id="current-path"></div>
+        </div>
+        <div class="card">
+            <h2>Published to IPFS</h2>
+            <div class="value success" id="published">--</div>
+        </div>
+        <div class="card">
+            <h2>From Tracker</h2>
+            <div class="value" id="tracker">--</div>
+        </div>
+        <div class="card">
+            <h2>Already Cached</h2>
+            <div class="value" id="cached">--</div>
+        </div>
+        <div class="card">
+            <h2>Skipped</h2>
+            <div class="value warning" id="skipped">--</div>
+        </div>
+        <div class="card">
+            <h2>CID Cache Size</h2>
+            <div class="value" id="cache-size">--</div>
+        </div>
+        <div class="card">
+            <h2>Status</h2>
+            <div class="status-row">
+                <span class="status-label">Mode</span>
+                <span id="mode"><span class="mode-badge">--</span></span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">IPFS Daemon</span>
+                <span class="status-value" id="ipfs-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Scan Active</span>
+                <span class="status-value" id="scan-active">--</span>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function update() {
+            try {
+                const [scanResp, statsResp] = await Promise.all([
+                    fetch('/scan-status'),
+                    fetch('/dashboard-stats')
+                ]);
+
+                if (!scanResp.ok || !statsResp.ok) {
+                    throw new Error('Failed to fetch data');
+                }
+
+                const scan = await scanResp.json();
+                const stats = await statsResp.json();
+
+                document.getElementById('error').style.display = 'none';
+
+                // Scan progress
+                const percent = scan.percent || 0;
+                document.getElementById('percent').textContent = percent.toFixed(1) + '%';
+                document.getElementById('bar').style.width = percent + '%';
+
+                // Scan stats
+                document.getElementById('published').textContent = scan.published || 0;
+                document.getElementById('tracker').textContent = scan.from_tracker || 0;
+                document.getElementById('cached').textContent = scan.already_cached || 0;
+                document.getElementById('skipped').textContent = scan.skipped || 0;
+
+                // Current path
+                const currentPath = scan.current_path || '';
+                document.getElementById('current-path').textContent = currentPath ?
+                    'Processing: ' + currentPath : (scan.active ? 'Starting...' : '');
+
+                // Dashboard stats
+                document.getElementById('cache-size').textContent = stats.cid_cache_size || 0;
+
+                // Mode badge
+                const mode = stats.mode || 'unknown';
+                const modeEl = document.getElementById('mode');
+                modeEl.innerHTML = '<span class="mode-badge ' + mode + '">' + mode + '</span>';
+
+                // IPFS status
+                const ipfsEl = document.getElementById('ipfs-status');
+                if (stats.ipfs_available) {
+                    ipfsEl.textContent = 'Connected';
+                    ipfsEl.style.color = '#00ff88';
+                } else {
+                    ipfsEl.textContent = 'Disconnected';
+                    ipfsEl.style.color = '#ff4444';
+                }
+
+                // Scan active
+                const activeEl = document.getElementById('scan-active');
+                if (scan.active) {
+                    activeEl.textContent = 'Yes';
+                    activeEl.style.color = '#00ff88';
+                } else {
+                    activeEl.textContent = 'No';
+                    activeEl.style.color = '#888';
+                }
+
+            } catch (e) {
+                document.getElementById('error').textContent = 'Error: ' + e.message;
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+
+        update();
+        setInterval(update, 2000);
+    </script>
+</body>
+</html>'''
+
+
+@app.route("/dashboard")
+async def dashboard(req: Request) -> Response:
+    """Serve the peerix dashboard HTML page."""
+    return Response(content=DASHBOARD_HTML, media_type="text/html")
+
+
+@app.route("/dashboard-stats")
+async def dashboard_stats(req: Request) -> Response:
+    """Get dashboard statistics as JSON."""
+    stats = {
+        "mode": "ipfs" if ipfs_access else "lan",
+        "cid_cache_size": 0,
+        "ipfs_available": False,
+    }
+
+    if ipfs_access is not None:
+        store = ipfs_access["store"]
+        stats["cid_cache_size"] = len(store._cid_cache)
+
+        # Check IPFS daemon connectivity
+        try:
+            client = await store._get_client()
+            resp = await client.post(f"{store.api_url}/id", timeout=5.0)
+            stats["ipfs_available"] = resp.status_code == 200
+        except Exception:
+            stats["ipfs_available"] = False
+
+    return JSONResponse(stats)
+
+
+@app.route("/batch-narinfo", methods=["POST"])
+async def batch_narinfo(req: Request) -> Response:
+    """
+    Fetch narinfo for multiple hashes in parallel.
+
+    Localhost only. Accepts {"hashes": ["hash1", "hash2", ...]}.
+    Returns {"hash1": <narinfo_dict>, "hash2": null, ...}.
+    Limited to 100 hashes per request.
+    """
+    # Restrict to localhost
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    hashes = body.get("hashes", [])
+    if not isinstance(hashes, list):
+        return JSONResponse({"error": "hashes must be a list"}, status_code=400)
+
+    # Limit batch size to prevent abuse
+    hashes = hashes[:100]
+
+    results = await ipfs_access["store"].batch_narinfo(hashes)
+
+    # Convert NarInfo to dict for JSON serialization
+    output = {}
+    for h, ni in results.items():
+        if ni is not None:
+            output[h] = {
+                "storePath": ni.storePath,
+                "url": ni.url,
+                "compression": ni.compression,
+                "fileHash": ni.fileHash,
+                "fileSize": ni.fileSize,
+                "narHash": ni.narHash,
+                "narSize": ni.narSize,
+                "references": ni.references,
+                "deriver": ni.deriver,
+                "sig": ni.sig,
+            }
+        else:
+            output[h] = None
+
+    return JSONResponse(output)

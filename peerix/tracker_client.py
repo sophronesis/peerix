@@ -28,7 +28,14 @@ class TrackerClient:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=30.0,
+                ),
+            )
         return self._client
 
     def _load_announced_state(self) -> None:
@@ -185,6 +192,35 @@ class TrackerClient:
             return None
         data = resp.json()
         return data.get("cid")
+
+    async def batch_get_cid(self, nar_hashes: t.List[str]) -> t.Dict[str, str]:
+        """
+        Get IPFS CIDs for multiple NarHashes in one request.
+
+        Args:
+            nar_hashes: List of NarHash values to look up
+
+        Returns:
+            Dict mapping NarHash to CID (only includes found mappings)
+        """
+        if not nar_hashes:
+            return {}
+
+        client = await self._get_client()
+        try:
+            resp = await client.post(
+                f"{self.tracker_url}/cids/batch",
+                json={"nar_hashes": nar_hashes},
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Batch CID lookup failed: {resp.status_code}")
+                return {}
+            data = resp.json()
+            return data.get("cids", {})
+        except Exception as e:
+            logger.warning(f"Batch CID lookup error: {e}")
+            return {}
 
     async def get_all_cids(self) -> t.Dict[str, str]:
         """Get all NarHash→CID mappings from tracker."""
