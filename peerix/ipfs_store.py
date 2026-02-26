@@ -80,6 +80,11 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
+        # EMA rate estimation for stable ETA
+        self._rate_ema: float = 0.0  # Smoothed rate (items/sec)
+        self._rate_last_processed: int = 0
+        self._rate_last_time: float = 0.0
+        self._rate_alpha: float = 0.15  # EMA smoothing factor (lower = smoother)
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -116,6 +121,7 @@ class IPFSStore(Store):
             started_at: float - scan start timestamp
             percent: float - completion percentage
             eta_seconds: float - estimated seconds remaining (null if not calculable)
+            rate: float - current processing rate (items/sec, EMA smoothed)
         """
         import time
         progress = self._scan_progress.copy()
@@ -124,16 +130,45 @@ class IPFSStore(Store):
         else:
             progress["percent"] = 0.0
 
-        # Calculate ETA
+        # Calculate ETA using EMA-smoothed rate
         progress["eta_seconds"] = None
-        if progress["active"] and progress["started_at"] and progress["processed"] > 0:
-            elapsed = time.time() - progress["started_at"]
-            rate = progress["processed"] / elapsed  # paths per second
-            remaining = progress["total"] - progress["processed"]
-            if rate > 0:
-                progress["eta_seconds"] = round(remaining / rate, 1)
+        progress["rate"] = 0.0
+        now = time.time()
+
+        if progress["active"] and progress["processed"] > 0:
+            # Update EMA rate estimate
+            delta_items = progress["processed"] - self._rate_last_processed
+            delta_time = now - self._rate_last_time if self._rate_last_time > 0 else 0
+
+            if delta_time > 0.5 and delta_items > 0:  # Update every 0.5s minimum
+                instant_rate = delta_items / delta_time
+
+                if self._rate_ema <= 0:
+                    # First measurement - initialize with instant rate
+                    self._rate_ema = instant_rate
+                else:
+                    # EMA update: new = alpha * instant + (1 - alpha) * old
+                    self._rate_ema = (
+                        self._rate_alpha * instant_rate +
+                        (1 - self._rate_alpha) * self._rate_ema
+                    )
+
+                self._rate_last_processed = progress["processed"]
+                self._rate_last_time = now
+
+            # Calculate ETA from smoothed rate
+            if self._rate_ema > 0:
+                remaining = progress["total"] - progress["processed"]
+                progress["eta_seconds"] = round(remaining / self._rate_ema, 1)
+                progress["rate"] = round(self._rate_ema, 1)
 
         return progress
+
+    def _reset_rate_tracking(self) -> None:
+        """Reset EMA rate tracking for new scan."""
+        self._rate_ema = 0.0
+        self._rate_last_processed = 0
+        self._rate_last_time = 0.0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -639,6 +674,7 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": time.time(),
         }
+        self._reset_rate_tracking()
 
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
