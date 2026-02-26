@@ -80,6 +80,16 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
+        # PID controller state for rate smoothing
+        self._pid_rate: float = 0.0  # Current smoothed rate estimate
+        self._pid_integral: float = 0.0  # Accumulated error
+        self._pid_last_error: float = 0.0  # Previous error for derivative
+        self._pid_last_time: float = 0.0  # Last update time
+        self._pid_last_processed: int = 0  # Last processed count
+        # PID tuning parameters (conservative for smooth output)
+        self._pid_kp: float = 0.3   # Proportional gain
+        self._pid_ki: float = 0.05  # Integral gain
+        self._pid_kd: float = 0.1   # Derivative gain
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -129,25 +139,59 @@ class IPFSStore(Store):
         progress["rate"] = 0.0
 
         if progress["active"] and progress["started_at"] and progress["processed"] > 0:
-            elapsed = time.time() - progress["started_at"]
-
-            # Work items = items that required actual processing (not instant cache hits)
-            work_done = progress["published"] + progress["from_tracker"] + progress["skipped"]
+            now = time.time()
             remaining = progress["total"] - progress["processed"]
 
-            # Cached items are processed instantly at start, so remaining items are all work items
-            # Calculate rate based on work items only
-            if work_done > 10:
-                work_rate = work_done / elapsed
-                progress["eta_seconds"] = round(remaining / work_rate, 1) if work_rate > 0 else None
-                progress["rate"] = round(work_rate, 1)
-            else:
-                # Not enough work items yet, use simple estimate
-                rate = progress["processed"] / elapsed
-                progress["eta_seconds"] = round(remaining / rate, 1) if rate > 0 else None
-                progress["rate"] = round(rate, 1)
+            # Calculate instantaneous rate
+            dt = now - self._pid_last_time if self._pid_last_time > 0 else 0
+            if dt > 0.1:  # Update at least every 100ms
+                items_delta = progress["processed"] - self._pid_last_processed
+                instant_rate = items_delta / dt if dt > 0 else 0
+
+                # PID controller to smooth rate estimate
+                if self._pid_rate <= 0:
+                    # Initialize with first measurement
+                    self._pid_rate = instant_rate
+                else:
+                    # Error = difference between instant and smoothed rate
+                    error = instant_rate - self._pid_rate
+
+                    # Integral term (with anti-windup clamp)
+                    self._pid_integral += error * dt
+                    self._pid_integral = max(-1000, min(1000, self._pid_integral))
+
+                    # Derivative term
+                    derivative = (error - self._pid_last_error) / dt if dt > 0 else 0
+
+                    # PID output adjusts the rate estimate
+                    adjustment = (
+                        self._pid_kp * error +
+                        self._pid_ki * self._pid_integral +
+                        self._pid_kd * derivative
+                    )
+                    self._pid_rate += adjustment
+                    self._pid_rate = max(0.1, self._pid_rate)  # Clamp to positive
+
+                    self._pid_last_error = error
+
+                self._pid_last_time = now
+                self._pid_last_processed = progress["processed"]
+
+            # Use PID-smoothed rate for ETA
+            if self._pid_rate > 0:
+                progress["eta_seconds"] = round(remaining / self._pid_rate, 1)
+                progress["rate"] = round(self._pid_rate, 1)
 
         return progress
+
+    def _reset_pid(self) -> None:
+        """Reset PID controller state for new scan."""
+        import time
+        self._pid_rate = 0.0
+        self._pid_integral = 0.0
+        self._pid_last_error = 0.0
+        self._pid_last_time = time.time()
+        self._pid_last_processed = 0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -653,6 +697,7 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": time.time(),
         }
+        self._reset_pid()
 
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
