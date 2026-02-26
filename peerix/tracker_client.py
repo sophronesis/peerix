@@ -186,6 +186,22 @@ class TrackerClient:
         data = resp.json()
         return data.get("cid")
 
+    async def get_all_cids(self) -> t.Dict[str, str]:
+        """Get all NarHash→CID mappings from tracker."""
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"{self.tracker_url}/cids", timeout=60.0)
+            if resp.status_code != 200:
+                logger.warning(f"Failed to fetch CIDs: {resp.status_code}")
+                return {}
+            data = resp.json()
+            cids = data.get("cids", {})
+            logger.info(f"Fetched {len(cids)} CID mappings from tracker")
+            return cids
+        except Exception as e:
+            logger.warning(f"Error fetching CIDs: {e}")
+            return {}
+
     async def register_cid(self, nar_hash: str, cid: str) -> bool:
         """Register an IPFS CID for a NarHash."""
         client = await self._get_client()

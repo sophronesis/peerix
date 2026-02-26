@@ -472,6 +472,8 @@ class IPFSStore(Store):
         Scan local nix store and publish applicable packages to IPFS.
 
         Scans all store paths (after filtering sensitive packages).
+        Before publishing, checks tracker for existing CIDs to avoid
+        re-uploading content that's already in the network.
         Uploads are parallelized with configurable concurrency.
 
         Args:
@@ -483,23 +485,32 @@ class IPFSStore(Store):
         """
         logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency})...")
 
+        # Fetch existing CIDs from tracker to avoid re-publishing
+        tracker_cids: t.Dict[str, str] = {}
+        if self.tracker_client is not None:
+            try:
+                tracker_cids = await self.tracker_client.get_all_cids()
+                logger.info(f"Fetched {len(tracker_cids)} existing CIDs from tracker")
+            except Exception as e:
+                logger.warning(f"Failed to fetch CIDs from tracker: {e}")
+
         # Get all store paths
         store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
         # Counters (safe since trio is single-threaded)
-        counters = {"published": 0, "skipped": 0, "already_cached": 0}
+        counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
         semaphore = trio.Semaphore(concurrency)
 
         async def publish_one(hsh: str) -> None:
             """Publish a single store path to IPFS."""
-            # Skip if already in cache (check before acquiring semaphore)
+            # Skip if already in local cache
             if hsh in self._cid_cache:
                 counters["already_cached"] += 1
                 return
 
             async with semaphore:
-                # Double-check cache (another task might have added it)
+                # Double-check cache
                 if hsh in self._cid_cache:
                     counters["already_cached"] += 1
                     return
@@ -516,11 +527,26 @@ class IPFSStore(Store):
                         counters["skipped"] += 1
                         return
 
-                    # Publish to IPFS
+                    # Check if CID exists on tracker (use store hash as key)
+                    if hsh in tracker_cids:
+                        # Use existing CID from tracker, skip IPFS upload
+                        cid = tracker_cids[hsh]
+                        self._cid_cache[hsh] = cid
+                        counters["from_tracker"] += 1
+                        logger.debug(f"Using tracker CID for {hsh}: {cid}")
+                        return
+
+                    # Not on tracker - publish to IPFS
                     cid = await self.publish_nar(hsh)
                     if cid:
                         counters["published"] += 1
                         logger.debug(f"Published {hsh} -> {cid}")
+                        # Register new CID with tracker
+                        if self.tracker_client is not None:
+                            try:
+                                await self.tracker_client.register_cid(hsh, cid)
+                            except Exception as e:
+                                logger.debug(f"Failed to register CID: {e}")
                     else:
                         counters["skipped"] += 1
 
@@ -533,8 +559,13 @@ class IPFSStore(Store):
             for hsh in store_hashes:
                 nursery.start_soon(publish_one, hsh)
 
+        # Save cache if we got new CIDs from tracker
+        if counters["from_tracker"] > 0:
+            self._save_cache()
+
         logger.info(
             f"Store scan complete: {counters['published']} published, "
+            f"{counters['from_tracker']} from tracker, "
             f"{counters['skipped']} skipped, {counters['already_cached']} already cached"
         )
         return counters["published"], counters["skipped"]

@@ -346,6 +346,13 @@ def create_tracker_app(db_path: str) -> Starlette:
             "created_at": row[2],
         })
 
+    @app.route("/cids", methods=["GET"])
+    async def get_all_cids(req: Request) -> Response:
+        """Get all NarHash→CID mappings. Peers use this to skip re-publishing."""
+        rows = conn.execute("SELECT nar_hash, cid FROM cid_mappings").fetchall()
+        cids = {row[0]: row[1] for row in rows}
+        return JSONResponse({"cids": cids, "count": len(cids)})
+
     @app.route("/cid", methods=["POST"])
     async def register_cid(req: Request) -> Response:
         """Register an IPFS CID for a NarHash."""
