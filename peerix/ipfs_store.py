@@ -80,9 +80,6 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
-        # Rate estimation: measure first batch, use that rate
-        self._rate_calibrated: float = 0.0  # Fixed rate after calibration (items/sec)
-        self._rate_calibration_size: int = 1000  # Items to process before locking rate
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -134,24 +131,29 @@ class IPFSStore(Store):
         if progress["active"] and progress["started_at"] and progress["processed"] > 0:
             elapsed = time.time() - progress["started_at"]
 
-            # Calibrate rate after first batch, then lock it
-            if self._rate_calibrated <= 0 and progress["processed"] >= self._rate_calibration_size:
-                self._rate_calibrated = progress["processed"] / elapsed
-                logger.debug(f"Rate calibrated: {self._rate_calibrated:.1f} items/sec")
+            # Work items = items that required actual processing (not instant cache hits)
+            work_done = progress["published"] + progress["from_tracker"] + progress["skipped"]
+            remaining_total = progress["total"] - progress["processed"]
 
-            # Use calibrated rate if available, otherwise use current average
-            rate = self._rate_calibrated if self._rate_calibrated > 0 else (progress["processed"] / elapsed)
+            # Estimate remaining work items (assume same ratio as processed so far)
+            if progress["processed"] > 0:
+                cached_ratio = progress["already_cached"] / progress["processed"]
+                remaining_work = remaining_total * (1 - cached_ratio)
+            else:
+                remaining_work = remaining_total
 
-            if rate > 0:
-                remaining = progress["total"] - progress["processed"]
-                progress["eta_seconds"] = round(remaining / rate, 1)
+            # Calculate rate based on work items, not cached hits
+            if work_done > 10:  # Need some work items to estimate
+                work_rate = work_done / elapsed
+                progress["eta_seconds"] = round(remaining_work / work_rate, 1) if work_rate > 0 else None
+                progress["rate"] = round(work_rate, 1)
+            else:
+                # Not enough work items yet, use simple estimate
+                rate = progress["processed"] / elapsed
+                progress["eta_seconds"] = round(remaining_total / rate, 1) if rate > 0 else None
                 progress["rate"] = round(rate, 1)
 
         return progress
-
-    def _reset_rate_tracking(self) -> None:
-        """Reset rate calibration for new scan."""
-        self._rate_calibrated = 0.0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -657,7 +659,6 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": time.time(),
         }
-        self._reset_rate_tracking()
 
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
