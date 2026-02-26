@@ -359,6 +359,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             word-break: break-all;
             font-family: monospace;
         }
+        .eta {
+            font-size: 14px;
+            color: #00d9ff;
+            margin-top: 8px;
+        }
         .error-msg {
             background: #ff444433;
             border: 1px solid #ff4444;
@@ -376,6 +381,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             <h2>Scan Progress</h2>
             <div class="value" id="percent">--</div>
             <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
+            <div class="eta" id="eta"></div>
             <div class="current-path" id="current-path"></div>
         </div>
         <div class="card">
@@ -441,6 +447,27 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('tracker').textContent = scan.from_tracker || 0;
                 document.getElementById('cached').textContent = scan.already_cached || 0;
                 document.getElementById('skipped').textContent = scan.skipped || 0;
+
+                // ETA
+                const etaEl = document.getElementById('eta');
+                if (scan.active && scan.eta_seconds) {
+                    const eta = scan.eta_seconds;
+                    let etaText;
+                    if (eta < 60) {
+                        etaText = Math.round(eta) + 's remaining';
+                    } else if (eta < 3600) {
+                        const mins = Math.floor(eta / 60);
+                        const secs = Math.round(eta % 60);
+                        etaText = mins + 'm ' + secs + 's remaining';
+                    } else {
+                        const hours = Math.floor(eta / 3600);
+                        const mins = Math.floor((eta % 3600) / 60);
+                        etaText = hours + 'h ' + mins + 'm remaining';
+                    }
+                    etaEl.textContent = etaText;
+                } else {
+                    etaEl.textContent = '';
+                }
 
                 // Current path
                 const currentPath = scan.current_path || '';

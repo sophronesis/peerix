@@ -115,12 +115,24 @@ class IPFSStore(Store):
             current_path: str - store path currently being processed
             started_at: float - scan start timestamp
             percent: float - completion percentage
+            eta_seconds: float - estimated seconds remaining (null if not calculable)
         """
+        import time
         progress = self._scan_progress.copy()
         if progress["total"] > 0:
             progress["percent"] = round(100 * progress["processed"] / progress["total"], 1)
         else:
             progress["percent"] = 0.0
+
+        # Calculate ETA
+        progress["eta_seconds"] = None
+        if progress["active"] and progress["started_at"] and progress["processed"] > 0:
+            elapsed = time.time() - progress["started_at"]
+            rate = progress["processed"] / elapsed  # paths per second
+            remaining = progress["total"] - progress["processed"]
+            if rate > 0:
+                progress["eta_seconds"] = round(remaining / rate, 1)
+
         return progress
 
     async def sync_cid_mappings_to_tracker(self) -> int:
