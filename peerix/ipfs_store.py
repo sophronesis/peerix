@@ -50,6 +50,19 @@ class IPFSStore(Store):
         tracker_client: t.Any = None,
         upstream_cache: str = "https://cache.nixos.org",
     ):
+        # Scan progress tracking
+        self._scan_progress: t.Dict[str, t.Any] = {
+            "active": False,
+            "total": 0,
+            "processed": 0,
+            "published": 0,
+            "from_tracker": 0,
+            "skipped": 0,
+            "already_cached": 0,
+            "current_hash": None,
+            "current_path": None,
+            "started_at": None,
+        }
         """
         Initialize the IPFS store.
 
@@ -78,6 +91,30 @@ class IPFSStore(Store):
         """Set the tracker client for CID registry."""
         self.tracker_client = tracker_client
         logger.info("IPFSStore: tracker client configured for CID lookups")
+
+    def get_scan_progress(self) -> t.Dict[str, t.Any]:
+        """
+        Get current scan progress.
+
+        Returns dict with:
+            active: bool - whether a scan is running
+            total: int - total paths to process
+            processed: int - paths processed so far
+            published: int - new NARs published to IPFS
+            from_tracker: int - CIDs reused from tracker
+            skipped: int - paths skipped (filtered/failed)
+            already_cached: int - already in local cache
+            current_hash: str - hash currently being processed
+            current_path: str - store path currently being processed
+            started_at: float - scan start timestamp
+            percent: float - completion percentage
+        """
+        progress = self._scan_progress.copy()
+        if progress["total"] > 0:
+            progress["percent"] = round(100 * progress["processed"] / progress["total"], 1)
+        else:
+            progress["percent"] = 0.0
+        return progress
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -483,6 +520,7 @@ class IPFSStore(Store):
         Returns:
             Tuple of (published_count, skipped_count)
         """
+        import time
         logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency})...")
 
         # Fetch existing CIDs from tracker to avoid re-publishing
@@ -498,6 +536,20 @@ class IPFSStore(Store):
         store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
+        # Initialize progress tracking
+        self._scan_progress = {
+            "active": True,
+            "total": len(store_hashes),
+            "processed": 0,
+            "published": 0,
+            "from_tracker": 0,
+            "skipped": 0,
+            "already_cached": 0,
+            "current_hash": None,
+            "current_path": None,
+            "started_at": time.time(),
+        }
+
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
         semaphore = trio.Semaphore(concurrency)
@@ -507,24 +559,38 @@ class IPFSStore(Store):
             # Skip if already in local cache
             if hsh in self._cid_cache:
                 counters["already_cached"] += 1
+                self._scan_progress["already_cached"] = counters["already_cached"]
+                self._scan_progress["processed"] += 1
                 return
 
             async with semaphore:
+                # Update current processing info
+                self._scan_progress["current_hash"] = hsh
+
                 # Double-check cache
                 if hsh in self._cid_cache:
                     counters["already_cached"] += 1
+                    self._scan_progress["already_cached"] = counters["already_cached"]
+                    self._scan_progress["processed"] += 1
                     return
 
                 try:
                     ni = await self.local_store.narinfo(hsh)
                     if ni is None:
                         counters["skipped"] += 1
+                        self._scan_progress["skipped"] = counters["skipped"]
+                        self._scan_progress["processed"] += 1
                         return
+
+                    # Update current path being processed
+                    self._scan_progress["current_path"] = ni.storePath
 
                     # Check exclusion patterns
                     if self._is_excluded(ni.storePath, extra_patterns):
                         logger.debug(f"Excluded: {ni.storePath}")
                         counters["skipped"] += 1
+                        self._scan_progress["skipped"] = counters["skipped"]
+                        self._scan_progress["processed"] += 1
                         return
 
                     # Check if CID exists on tracker (use store hash as key)
@@ -533,6 +599,8 @@ class IPFSStore(Store):
                         cid = tracker_cids[hsh]
                         self._cid_cache[hsh] = cid
                         counters["from_tracker"] += 1
+                        self._scan_progress["from_tracker"] = counters["from_tracker"]
+                        self._scan_progress["processed"] += 1
                         logger.debug(f"Using tracker CID for {hsh}: {cid}")
                         return
 
@@ -540,6 +608,7 @@ class IPFSStore(Store):
                     cid = await self.publish_nar(hsh)
                     if cid:
                         counters["published"] += 1
+                        self._scan_progress["published"] = counters["published"]
                         logger.debug(f"Published {hsh} -> {cid}")
                         # Register new CID with tracker
                         if self.tracker_client is not None:
@@ -549,10 +618,15 @@ class IPFSStore(Store):
                                 logger.debug(f"Failed to register CID: {e}")
                     else:
                         counters["skipped"] += 1
+                        self._scan_progress["skipped"] = counters["skipped"]
+
+                    self._scan_progress["processed"] += 1
 
                 except Exception as e:
                     logger.debug(f"Failed to process {hsh}: {e}")
                     counters["skipped"] += 1
+                    self._scan_progress["skipped"] = counters["skipped"]
+                    self._scan_progress["processed"] += 1
 
         # Process all hashes in parallel with limited concurrency
         async with trio.open_nursery() as nursery:
@@ -562,6 +636,11 @@ class IPFSStore(Store):
         # Save cache if we got new CIDs from tracker
         if counters["from_tracker"] > 0:
             self._save_cache()
+
+        # Mark scan as complete
+        self._scan_progress["active"] = False
+        self._scan_progress["current_hash"] = None
+        self._scan_progress["current_path"] = None
 
         logger.info(
             f"Store scan complete: {counters['published']} published, "

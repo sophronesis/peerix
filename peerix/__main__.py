@@ -1,10 +1,12 @@
 import os
+import sys
 import signal
 import logging
 import argparse
 
 import trio
 import psutil
+import httpx
 from hypercorn import Config
 from hypercorn.trio import serve
 
@@ -12,6 +14,53 @@ from peerix.app import app, setup_stores
 
 
 logger = logging.getLogger("peerix.main")
+
+
+def status_command(args):
+    """Query the running peerix daemon for scan status."""
+    url = f"http://127.0.0.1:{args.port}/scan-status"
+    try:
+        resp = httpx.get(url, timeout=5.0)
+        if resp.status_code != 200:
+            print(f"Error: {resp.text}")
+            sys.exit(1)
+
+        data = resp.json()
+
+        if not data.get("active", False):
+            print("No scan currently running.")
+            if data.get("total", 0) > 0:
+                print(f"Last scan: {data['processed']}/{data['total']} paths")
+                print(f"  Published: {data.get('published', 0)}")
+                print(f"  From tracker: {data.get('from_tracker', 0)}")
+                print(f"  Skipped: {data.get('skipped', 0)}")
+                print(f"  Already cached: {data.get('already_cached', 0)}")
+            return
+
+        # Active scan
+        percent = data.get("percent", 0)
+        processed = data.get("processed", 0)
+        total = data.get("total", 0)
+        current_path = data.get("current_path") or data.get("current_hash") or "unknown"
+
+        # Truncate path for display
+        if len(current_path) > 60:
+            current_path = "..." + current_path[-57:]
+
+        print(f"Scan progress: {percent:.1f}% ({processed}/{total})")
+        print(f"  Published: {data.get('published', 0)}")
+        print(f"  From tracker: {data.get('from_tracker', 0)}")
+        print(f"  Skipped: {data.get('skipped', 0)}")
+        print(f"  Already cached: {data.get('already_cached', 0)}")
+        print(f"  Current: {current_path}")
+
+    except httpx.ConnectError:
+        print(f"Error: Cannot connect to peerix daemon at {url}")
+        print("Is peerix running?")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
 
 async def memory_monitor_task(interval: int = 600):
@@ -28,30 +77,55 @@ async def memory_monitor_task(interval: int = 600):
         )
 
 parser = argparse.ArgumentParser(description="Peerix nix binary cache.")
+subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+# Main daemon command (default)
+serve_parser = subparsers.add_parser("serve", help="Run the peerix daemon (default)")
+serve_parser.add_argument("--verbose", action="store_const", const=logging.DEBUG, default=logging.INFO, dest="loglevel")
+serve_parser.add_argument("--port", default=12304, type=int)
+serve_parser.add_argument("--private-key", required=False)
+serve_parser.add_argument("--timeout", type=int, default=50)
+serve_parser.add_argument("--mode", choices=["lan", "ipfs"], default="ipfs",
+                    help="Discovery mode: ipfs (IPFS-based, default) or lan (UDP broadcast)")
+serve_parser.add_argument("--tracker-url", default=None,
+                    help="URL of the peerix tracker for CID registry (used in IPFS mode)")
+serve_parser.add_argument("--scan-interval", type=int, default=3600,
+                    help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
+serve_parser.add_argument("--ipfs-concurrency", type=int, default=10,
+                    help="Number of parallel IPFS uploads (default: 10)")
+serve_parser.add_argument("--priority", type=int, default=5,
+                    help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
+
+# Status command
+status_parser = subparsers.add_parser("status", help="Show current scan progress")
+status_parser.add_argument("--port", default=12304, type=int, help="Port of the running peerix daemon")
+
+# Also support legacy (no subcommand) usage
 parser.add_argument("--verbose", action="store_const", const=logging.DEBUG, default=logging.INFO, dest="loglevel")
 parser.add_argument("--port", default=12304, type=int)
 parser.add_argument("--private-key", required=False)
 parser.add_argument("--timeout", type=int, default=50)
-
-# Mode selection
 parser.add_argument("--mode", choices=["lan", "ipfs"], default="ipfs",
                     help="Discovery mode: ipfs (IPFS-based, default) or lan (UDP broadcast)")
-
-# IPFS options
 parser.add_argument("--tracker-url", default=None,
                     help="URL of the peerix tracker for CID registry (used in IPFS mode)")
 parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
 parser.add_argument("--ipfs-concurrency", type=int, default=10,
                     help="Number of parallel IPFS uploads (default: 10)")
-
-# Cache options
 parser.add_argument("--priority", type=int, default=5,
                     help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
 
 
 def run():
     args = parser.parse_args()
+
+    # Handle subcommands
+    if args.command == "status":
+        status_command(args)
+        return
+
+    # Default: run the daemon (serve command or no command)
     if args.private_key is not None:
         os.environ["NIX_SECRET_KEY_FILE"] = os.path.abspath(os.path.expanduser(args.private_key))
 

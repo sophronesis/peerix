@@ -5,7 +5,7 @@ import typing as t
 
 import trio
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import Response, StreamingResponse, JSONResponse
 from starlette.applications import Starlette
 
 from peerix.local import local
@@ -267,3 +267,13 @@ async def pull_ipfs_nar(req: Request) -> Response:
         return StreamingResponse(stream_nar(), media_type="text/plain")
     except FileNotFoundError:
         return Response(content="Gone", status_code=404)
+
+
+@app.route("/scan-status")
+async def scan_status(req: Request) -> Response:
+    """Get current IPFS scan progress."""
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled", "active": False}, status_code=404)
+
+    progress = ipfs_access["store"].get_scan_progress()
+    return JSONResponse(progress)
