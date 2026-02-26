@@ -8,6 +8,7 @@ import typing as t
 import logging
 import hashlib
 import json
+import gzip
 import os
 import fnmatch
 import uuid
@@ -26,7 +27,11 @@ logger = logging.getLogger("peerix.ipfs")
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
 
 # Path to store NarHash → CID mappings
-CID_CACHE_PATH = "/var/lib/peerix/cid_cache.json"
+# Uses gzip compression for ~73% space savings
+CID_CACHE_PATH = "/var/lib/peerix/cid_cache.json.gz"
+
+# Legacy uncompressed path (for migration)
+CID_CACHE_PATH_LEGACY = "/var/lib/peerix/cid_cache.json"
 
 # Default scan interval (1 hour)
 DEFAULT_SCAN_INTERVAL = 3600
@@ -50,6 +55,18 @@ class IPFSStore(Store):
         tracker_client: t.Any = None,
         upstream_cache: str = "https://cache.nixos.org",
     ):
+        """
+        Initialize the IPFS store.
+
+        Args:
+            local_store: The underlying local store
+            api_url: IPFS HTTP API URL
+            cache_path: Path to gzip-compressed CID cache file
+            publish_local: Whether to publish local NARs to IPFS
+            fetch_timeout: Timeout for IPFS fetches
+            tracker_client: Optional tracker client for CID registry
+            upstream_cache: Upstream cache URL for narinfo fallback
+        """
         # Scan progress tracking
         self._scan_progress: t.Dict[str, t.Any] = {
             "active": False,
@@ -63,28 +80,18 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
-        """
-        Initialize the IPFS store.
 
-        Args:
-            local_store: The underlying local store
-            api_url: IPFS HTTP API URL
-            cache_path: Path to CID cache file
-            publish_local: Whether to publish local NARs to IPFS
-            fetch_timeout: Timeout for IPFS fetches
-            tracker_client: Optional tracker client for CID registry
-            upstream_cache: Upstream cache URL for narinfo fallback
-        """
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
-        self.cache_path = cache_path
+        self.cache_path = cache_path  # Gzip-compressed JSON
         self.publish_local = publish_local
         self.fetch_timeout = fetch_timeout
         self.tracker_client = tracker_client
         self.upstream_cache = upstream_cache.rstrip("/")
 
         self._client: t.Optional[httpx.AsyncClient] = None
-        self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID
+        self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID (in-memory)
+        self._cache_dirty: bool = False  # Track if cache needs saving
         self._load_cache()
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
@@ -158,25 +165,61 @@ class IPFSStore(Store):
 
         return registered
 
-    def _load_cache(self) -> None:
-        """Load CID cache from disk."""
+    def _migrate_legacy_cache(self) -> None:
+        """Migrate uncompressed JSON cache to gzip-compressed format."""
+        legacy_path = CID_CACHE_PATH_LEGACY
+        if not os.path.exists(legacy_path):
+            return
+
         try:
+            with open(legacy_path, "r") as f:
+                legacy_cache = json.load(f)
+
+            if not legacy_cache:
+                return
+
+            logger.info(f"Migrating {len(legacy_cache)} CID mappings to compressed format...")
+
+            # Merge with any existing cache
+            self._cid_cache.update(legacy_cache)
+            self._save_cache()
+
+            # Rename old file as backup
+            backup_path = legacy_path + ".migrated"
+            os.rename(legacy_path, backup_path)
+            logger.info(f"Migrated cache, backed up to {backup_path}")
+        except Exception as e:
+            logger.warning(f"Migration failed: {e}")
+
+    def _load_cache(self) -> None:
+        """Load CID cache from gzip-compressed JSON file."""
+        try:
+            # First try loading compressed cache
             if os.path.exists(self.cache_path):
-                with open(self.cache_path, "r") as f:
+                with gzip.open(self.cache_path, "rt", encoding="utf-8") as f:
                     self._cid_cache = json.load(f)
-                logger.info(f"Loaded {len(self._cid_cache)} CID mappings from cache")
+                logger.info(f"Loaded {len(self._cid_cache)} CID mappings from compressed cache")
+
+            # Migrate legacy uncompressed cache if it exists
+            self._migrate_legacy_cache()
+
         except Exception as e:
             logger.warning(f"Failed to load CID cache: {e}")
             self._cid_cache = {}
 
     def _save_cache(self) -> None:
-        """Save CID cache to disk."""
+        """Save CID cache to gzip-compressed JSON file."""
         try:
             os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-            with open(self.cache_path, "w") as f:
+            with gzip.open(self.cache_path, "wt", encoding="utf-8") as f:
                 json.dump(self._cid_cache, f)
+            self._cache_dirty = False
         except Exception as e:
             logger.warning(f"Failed to save CID cache: {e}")
+
+    def _mark_dirty(self) -> None:
+        """Mark cache as needing save."""
+        self._cache_dirty = True
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -403,7 +446,7 @@ class IPFSStore(Store):
                 if cid:
                     # Cache it locally
                     self._cid_cache[hsh] = cid
-                    self._save_cache()
+                    self._mark_dirty()
                     logger.debug(f"Got CID from tracker for {hsh}: {cid}")
             except Exception as e:
                 logger.debug(f"Tracker CID lookup failed for {hsh}: {e}")
@@ -486,7 +529,7 @@ class IPFSStore(Store):
 
         if cid:
             self._cid_cache[hsh] = cid
-            self._save_cache()
+            self._mark_dirty()
             logger.info(f"Published {hsh} to IPFS: {cid}")
 
         return cid
@@ -598,6 +641,7 @@ class IPFSStore(Store):
                         # Use existing CID from tracker, skip IPFS upload
                         cid = tracker_cids[hsh]
                         self._cid_cache[hsh] = cid
+                        self._mark_dirty()
                         counters["from_tracker"] += 1
                         self._scan_progress["from_tracker"] = counters["from_tracker"]
                         self._scan_progress["processed"] += 1
@@ -633,8 +677,8 @@ class IPFSStore(Store):
             for hsh in store_hashes:
                 nursery.start_soon(publish_one, hsh)
 
-        # Save cache if we got new CIDs from tracker
-        if counters["from_tracker"] > 0:
+        # Save cache if dirty (gzip compression makes batch saves more efficient)
+        if self._cache_dirty:
             self._save_cache()
 
         # Mark scan as complete
