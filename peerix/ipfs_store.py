@@ -80,11 +80,9 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
-        # EMA rate estimation for stable ETA
-        self._rate_ema: float = 0.0  # Smoothed rate (items/sec)
-        self._rate_last_processed: int = 0
-        self._rate_last_time: float = 0.0
-        self._rate_alpha: float = 0.15  # EMA smoothing factor (lower = smoother)
+        # Rate estimation: measure first batch, use that rate
+        self._rate_calibrated: float = 0.0  # Fixed rate after calibration (items/sec)
+        self._rate_calibration_size: int = 1000  # Items to process before locking rate
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -121,7 +119,7 @@ class IPFSStore(Store):
             started_at: float - scan start timestamp
             percent: float - completion percentage
             eta_seconds: float - estimated seconds remaining (null if not calculable)
-            rate: float - current processing rate (items/sec, EMA smoothed)
+            rate: float - processing rate (items/sec)
         """
         import time
         progress = self._scan_progress.copy()
@@ -130,46 +128,30 @@ class IPFSStore(Store):
         else:
             progress["percent"] = 0.0
 
-        # Calculate ETA using EMA-smoothed rate
         progress["eta_seconds"] = None
         progress["rate"] = 0.0
-        now = time.time()
 
-        if progress["active"] and progress["processed"] > 0:
-            # Update EMA rate estimate
-            delta_items = progress["processed"] - self._rate_last_processed
-            delta_time = now - self._rate_last_time if self._rate_last_time > 0 else 0
+        if progress["active"] and progress["started_at"] and progress["processed"] > 0:
+            elapsed = time.time() - progress["started_at"]
 
-            if delta_time > 0.5 and delta_items > 0:  # Update every 0.5s minimum
-                instant_rate = delta_items / delta_time
+            # Calibrate rate after first batch, then lock it
+            if self._rate_calibrated <= 0 and progress["processed"] >= self._rate_calibration_size:
+                self._rate_calibrated = progress["processed"] / elapsed
+                logger.debug(f"Rate calibrated: {self._rate_calibrated:.1f} items/sec")
 
-                if self._rate_ema <= 0:
-                    # First measurement - initialize with instant rate
-                    self._rate_ema = instant_rate
-                else:
-                    # EMA update: new = alpha * instant + (1 - alpha) * old
-                    self._rate_ema = (
-                        self._rate_alpha * instant_rate +
-                        (1 - self._rate_alpha) * self._rate_ema
-                    )
+            # Use calibrated rate if available, otherwise use current average
+            rate = self._rate_calibrated if self._rate_calibrated > 0 else (progress["processed"] / elapsed)
 
-                self._rate_last_processed = progress["processed"]
-                self._rate_last_time = now
-
-            # Calculate ETA from smoothed rate
-            if self._rate_ema > 0:
+            if rate > 0:
                 remaining = progress["total"] - progress["processed"]
-                progress["eta_seconds"] = round(remaining / self._rate_ema, 1)
-                progress["rate"] = round(self._rate_ema, 1)
+                progress["eta_seconds"] = round(remaining / rate, 1)
+                progress["rate"] = round(rate, 1)
 
         return progress
 
     def _reset_rate_tracking(self) -> None:
-        """Reset EMA rate tracking for new scan."""
-        import time
-        self._rate_ema = 0.0
-        self._rate_last_processed = 0
-        self._rate_last_time = time.time()  # Initialize to now, not 0
+        """Reset rate calibration for new scan."""
+        self._rate_calibrated = 0.0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
