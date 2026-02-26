@@ -80,16 +80,13 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": None,
         }
-        # PID controller state for rate smoothing
-        self._pid_rate: float = 0.0  # Current smoothed rate estimate
-        self._pid_integral: float = 0.0  # Accumulated error
-        self._pid_last_error: float = 0.0  # Previous error for derivative
-        self._pid_last_time: float = 0.0  # Last update time
-        self._pid_last_processed: int = 0  # Last processed count
-        # PID tuning parameters (balanced - fast but stable)
-        self._pid_kp: float = 0.5
-        self._pid_ki: float = 0.08
-        self._pid_kd: float = 0.15
+        # Kalman filter state for rate smoothing
+        self._kalman_rate: float = 0.0  # Estimated rate
+        self._kalman_p: float = 1000.0  # Estimate uncertainty
+        self._kalman_q: float = 10.0  # Process noise (rate can change)
+        self._kalman_r: float = 500.0  # Measurement noise (higher = smoother)
+        self._kalman_last_time: float = 0.0
+        self._kalman_last_processed: int = 0
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -143,50 +140,42 @@ class IPFSStore(Store):
             elapsed = now - progress["started_at"]
             remaining = progress["total"] - progress["processed"]
 
-            # Initialize PID with cumulative rate (processed/elapsed) not zero
-            if self._pid_rate <= 0 and elapsed > 0:
-                self._pid_rate = progress["processed"] / elapsed
-                self._pid_last_time = now
-                self._pid_last_processed = progress["processed"]
+            # Initialize Kalman with cumulative rate
+            if self._kalman_rate <= 0 and elapsed > 0:
+                self._kalman_rate = progress["processed"] / elapsed
+                self._kalman_last_time = now
+                self._kalman_last_processed = progress["processed"]
 
-            # PID update
-            dt = now - self._pid_last_time if self._pid_last_time > 0 else 0
-            if dt > 0.1:  # Update every 100ms
-                items_delta = progress["processed"] - self._pid_last_processed
-                instant_rate = items_delta / dt if dt > 0 else self._pid_rate
+            # Kalman filter update
+            dt = now - self._kalman_last_time if self._kalman_last_time > 0 else 0
+            if dt > 0.1:
+                items_delta = progress["processed"] - self._kalman_last_processed
+                measured_rate = items_delta / dt if dt > 0 else self._kalman_rate
 
-                error = instant_rate - self._pid_rate
-                self._pid_integral = max(-1000, min(1000, self._pid_integral + error * dt))
-                derivative = (error - self._pid_last_error) / dt if dt > 0 else 0
+                # Predict step
+                self._kalman_p += self._kalman_q
 
-                adjustment = (
-                    self._pid_kp * error +
-                    self._pid_ki * self._pid_integral +
-                    self._pid_kd * derivative
-                )
-                # Limit adjustment to 20% of current rate per update
-                max_adj = self._pid_rate * 0.2
-                adjustment = max(-max_adj, min(max_adj, adjustment))
-                self._pid_rate += adjustment
-                self._pid_rate = max(1.0, self._pid_rate)
+                # Update step
+                k = self._kalman_p / (self._kalman_p + self._kalman_r)  # Kalman gain
+                self._kalman_rate += k * (measured_rate - self._kalman_rate)
+                self._kalman_p *= (1 - k)
+                self._kalman_rate = max(1.0, self._kalman_rate)
 
-                self._pid_last_error = error
-                self._pid_last_time = now
-                self._pid_last_processed = progress["processed"]
+                self._kalman_last_time = now
+                self._kalman_last_processed = progress["processed"]
 
-            if self._pid_rate > 0:
-                progress["eta_seconds"] = round(remaining / self._pid_rate, 1)
-                progress["rate"] = round(self._pid_rate, 1)
+            if self._kalman_rate > 0:
+                progress["eta_seconds"] = round(remaining / self._kalman_rate, 1)
+                progress["rate"] = round(self._kalman_rate, 1)
 
         return progress
 
-    def _reset_pid(self) -> None:
-        """Reset PID controller for new scan."""
-        self._pid_rate = 0.0
-        self._pid_integral = 0.0
-        self._pid_last_error = 0.0
-        self._pid_last_time = 0.0
-        self._pid_last_processed = 0
+    def _reset_kalman(self) -> None:
+        """Reset Kalman filter for new scan."""
+        self._kalman_rate = 0.0
+        self._kalman_p = 1000.0
+        self._kalman_last_time = 0.0
+        self._kalman_last_processed = 0
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -692,7 +681,7 @@ class IPFSStore(Store):
             "current_path": None,
             "started_at": time.time(),
         }
-        self._reset_pid()
+        self._reset_kalman()
 
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
