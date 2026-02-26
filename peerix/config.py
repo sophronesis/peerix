@@ -44,12 +44,44 @@ class PeerixConfig:
     signing: SigningConfig = field(default_factory=SigningConfig)
 
 
-def load_config(path: Optional[Path] = None) -> PeerixConfig:
+DEFAULT_CONFIG_CONTENT = """\
+# Peerix configuration file
+# https://github.com/sophronesis/peerix
+
+[daemon]
+port = 12304
+timeout = 50
+mode = "ipfs"  # "ipfs" or "lan"
+verbose = false
+priority = 5  # Lower = higher priority (cache.nixos.org is 10)
+
+[ipfs]
+# tracker_url = "http://tracker.example.com:12305"
+scan_interval = 3600  # Seconds between store scans (0 to disable)
+concurrency = 10  # Parallel IPFS uploads
+
+[signing]
+# private_key = "/path/to/key.pem"
+"""
+
+
+def create_default_config(path: Path) -> None:
+    """Create default config file if it doesn't exist."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(DEFAULT_CONFIG_CONTENT)
+        logger.info(f"Created default config at {path}")
+    except Exception as e:
+        logger.warning(f"Failed to create default config: {e}")
+
+
+def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> PeerixConfig:
     """
     Load configuration from TOML file.
 
     Args:
         path: Optional path to config file. Defaults to ~/.config/peerix/config.toml
+        create_if_missing: Create default config if file doesn't exist
 
     Returns:
         PeerixConfig with values from file, or defaults if file doesn't exist
@@ -57,6 +89,8 @@ def load_config(path: Optional[Path] = None) -> PeerixConfig:
     config_path = path or CONFIG_PATH
 
     if not config_path.exists():
+        if create_if_missing:
+            create_default_config(config_path)
         return PeerixConfig()
 
     try:

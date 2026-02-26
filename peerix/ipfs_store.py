@@ -84,7 +84,7 @@ class IPFSStore(Store):
         self._kalman_rate: float = 0.0  # Estimated rate
         self._kalman_p: float = 1000.0  # Estimate uncertainty
         self._kalman_q: float = 10.0  # Process noise (rate can change)
-        self._kalman_r: float = 500.0  # Measurement noise (higher = smoother)
+        self._kalman_r: float = 2000.0  # Measurement noise (higher = smoother)
         self._kalman_last_time: float = 0.0
         self._kalman_last_processed: int = 0
 
