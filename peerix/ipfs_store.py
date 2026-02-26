@@ -86,10 +86,10 @@ class IPFSStore(Store):
         self._pid_last_error: float = 0.0  # Previous error for derivative
         self._pid_last_time: float = 0.0  # Last update time
         self._pid_last_processed: int = 0  # Last processed count
-        # PID tuning parameters (aggressive for fast adaptation)
-        self._pid_kp: float = 0.7
-        self._pid_ki: float = 0.15
-        self._pid_kd: float = 0.2
+        # PID tuning parameters (balanced - fast but stable)
+        self._pid_kp: float = 0.5
+        self._pid_ki: float = 0.08
+        self._pid_kd: float = 0.15
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -159,12 +159,16 @@ class IPFSStore(Store):
                 self._pid_integral = max(-1000, min(1000, self._pid_integral + error * dt))
                 derivative = (error - self._pid_last_error) / dt if dt > 0 else 0
 
-                self._pid_rate += (
+                adjustment = (
                     self._pid_kp * error +
                     self._pid_ki * self._pid_integral +
                     self._pid_kd * derivative
                 )
-                self._pid_rate = max(0.1, self._pid_rate)
+                # Limit adjustment to 20% of current rate per update
+                max_adj = self._pid_rate * 0.2
+                adjustment = max(-max_adj, min(max_adj, adjustment))
+                self._pid_rate += adjustment
+                self._pid_rate = max(1.0, self._pid_rate)
 
                 self._pid_last_error = error
                 self._pid_last_time = now
