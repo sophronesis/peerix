@@ -133,24 +133,18 @@ class IPFSStore(Store):
 
             # Work items = items that required actual processing (not instant cache hits)
             work_done = progress["published"] + progress["from_tracker"] + progress["skipped"]
-            remaining_total = progress["total"] - progress["processed"]
+            remaining = progress["total"] - progress["processed"]
 
-            # Estimate remaining work items (assume same ratio as processed so far)
-            if progress["processed"] > 0:
-                cached_ratio = progress["already_cached"] / progress["processed"]
-                remaining_work = remaining_total * (1 - cached_ratio)
-            else:
-                remaining_work = remaining_total
-
-            # Calculate rate based on work items, not cached hits
-            if work_done > 10:  # Need some work items to estimate
+            # Cached items are processed instantly at start, so remaining items are all work items
+            # Calculate rate based on work items only
+            if work_done > 10:
                 work_rate = work_done / elapsed
-                progress["eta_seconds"] = round(remaining_work / work_rate, 1) if work_rate > 0 else None
+                progress["eta_seconds"] = round(remaining / work_rate, 1) if work_rate > 0 else None
                 progress["rate"] = round(work_rate, 1)
             else:
                 # Not enough work items yet, use simple estimate
                 rate = progress["processed"] / elapsed
-                progress["eta_seconds"] = round(remaining_total / rate, 1) if rate > 0 else None
+                progress["eta_seconds"] = round(remaining / rate, 1) if rate > 0 else None
                 progress["rate"] = round(rate, 1)
 
         return progress
