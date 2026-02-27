@@ -583,13 +583,11 @@ async def batch_narinfo(req: Request) -> Response:
                 "storePath": ni.storePath,
                 "url": ni.url,
                 "compression": ni.compression,
-                "fileHash": ni.fileHash,
-                "fileSize": ni.fileSize,
                 "narHash": ni.narHash,
                 "narSize": ni.narSize,
-                "references": ni.references,
+                "references": list(ni.references),
                 "deriver": ni.deriver,
-                "sig": ni.sig,
+                "signatures": list(ni.signatures),
             }
         else:
             output[h] = None
