@@ -71,6 +71,7 @@ class IPFSStore(Store):
         self._scan_progress: t.Dict[str, t.Any] = {
             "active": False,
             "total": 0,
+            "total_work": 0,
             "processed": 0,
             "published": 0,
             "from_tracker": 0,
@@ -127,8 +128,12 @@ class IPFSStore(Store):
         """
         import time
         progress = self._scan_progress.copy()
-        if progress["total"] > 0:
-            progress["percent"] = round(100 * progress["processed"] / progress["total"], 1)
+
+        # Calculate percent based on work items (excludes instant cache hits)
+        work_items = progress["published"] + progress["from_tracker"] + progress["skipped"]
+        total_work = progress.get("total_work", progress["total"])
+        if total_work > 0:
+            progress["percent"] = round(100 * work_items / total_work, 1)
         else:
             progress["percent"] = 0.0
 
@@ -683,10 +688,15 @@ class IPFSStore(Store):
         store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
+        # Count how many are already cached (instant hits)
+        already_in_cache = sum(1 for h in store_hashes if h in self._cid_cache)
+        total_work_estimate = len(store_hashes) - already_in_cache
+
         # Initialize progress tracking
         self._scan_progress = {
             "active": True,
             "total": len(store_hashes),
+            "total_work": total_work_estimate,
             "processed": 0,
             "published": 0,
             "from_tracker": 0,
