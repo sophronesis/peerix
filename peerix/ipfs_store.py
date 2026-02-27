@@ -106,10 +106,24 @@ class IPFSStore(Store):
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID (in-memory)
         self._skipped_cache: t.Set[str] = set()  # Hashes that were skipped
+        self._announced_cache: t.Set[str] = set()  # CIDs announced to DHT
         self._cache_dirty: bool = False  # Track if cache needs saving
         self._skipped_dirty: bool = False
+        self._announced_dirty: bool = False
+        self.announced_cache_path = cache_path.replace("cid_cache", "announced_cache")
         self._load_cache()
         self._load_skipped_cache()
+        self._load_announced_cache()
+
+        # Announcement progress tracking (separate from scan)
+        self._announce_progress: t.Dict[str, t.Any] = {
+            "active": False,
+            "total": 0,
+            "announced": 0,
+            "failed": 0,
+            "skipped": 0,  # Already announced
+            "started_at": None,
+        }
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
@@ -341,6 +355,53 @@ class IPFSStore(Store):
         except Exception as e:
             logger.warning(f"Failed to save skipped cache: {e}")
 
+    def _load_announced_cache(self) -> None:
+        """Load announced CIDs from gzip-compressed JSON file."""
+        try:
+            if os.path.exists(self.announced_cache_path):
+                with gzip.open(self.announced_cache_path, "rt", encoding="utf-8") as f:
+                    self._announced_cache = set(json.load(f))
+                logger.info(f"Loaded {len(self._announced_cache)} announced CIDs from cache")
+        except Exception as e:
+            logger.warning(f"Failed to load announced cache: {e}")
+            self._announced_cache = set()
+
+    def _save_announced_cache(self) -> None:
+        """Save announced CIDs to gzip-compressed JSON file."""
+        try:
+            os.makedirs(os.path.dirname(self.announced_cache_path), exist_ok=True)
+            with gzip.open(self.announced_cache_path, "wt", encoding="utf-8") as f:
+                json.dump(list(self._announced_cache), f)
+            self._announced_dirty = False
+        except Exception as e:
+            logger.warning(f"Failed to save announced cache: {e}")
+
+    def get_announce_progress(self) -> t.Dict[str, t.Any]:
+        """Get current DHT announcement progress."""
+        import time
+        progress = self._announce_progress.copy()
+
+        if progress["active"] and progress["started_at"] and progress["total"] > 0:
+            done = progress["announced"] + progress["failed"] + progress["skipped"]
+            progress["percent"] = round(100 * done / progress["total"], 1)
+
+            # Simple ETA based on elapsed time
+            elapsed = time.time() - progress["started_at"]
+            if done > 0:
+                rate = done / elapsed
+                remaining = progress["total"] - done
+                progress["eta_seconds"] = round(remaining / rate, 1) if rate > 0 else None
+            else:
+                progress["eta_seconds"] = None
+        else:
+            progress["percent"] = 0.0
+            progress["eta_seconds"] = None
+
+        # Add count of unannounced CIDs
+        progress["pending"] = len(self._cid_cache) - len(self._announced_cache)
+
+        return progress
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with connection pooling."""
         if self._client is None or self._client.is_closed:
@@ -527,16 +588,98 @@ class IPFSStore(Store):
             )
             if resp.status_code == 200:
                 logger.debug(f"Announced to DHT: {cid}")
+                self._announced_cache.add(cid)
+                self._announced_dirty = True
                 self._total_dht_announced += 1
                 if self._scan_progress["active"]:
                     self._scan_progress["dht_announced"] += 1
+                if self._announce_progress["active"]:
+                    self._announce_progress["announced"] += 1
                 return True
             else:
                 logger.warning(f"DHT announcement failed for {cid}: {resp.status_code}")
+                if self._announce_progress["active"]:
+                    self._announce_progress["failed"] += 1
                 return False
         except Exception as e:
             logger.warning(f"DHT announcement error for {cid}: {e}")
+            if self._announce_progress["active"]:
+                self._announce_progress["failed"] += 1
             return False
+
+    async def announce_all_to_dht(
+        self,
+        concurrency: int = 5,
+        force: bool = False,
+    ) -> t.Tuple[int, int, int]:
+        """
+        Announce all cached CIDs to the DHT.
+
+        This is a separate phase from scanning/publishing. It announces
+        provider records for all CIDs we have, making them discoverable.
+
+        Args:
+            concurrency: Max parallel announcements (default: 5, DHT is slow)
+            force: Re-announce even if already announced
+
+        Returns:
+            Tuple of (announced, failed, skipped)
+        """
+        import time
+        logger.info(f"Starting DHT announcement phase (concurrency={concurrency}, force={force})...")
+
+        # Get CIDs to announce
+        all_cids = set(self._cid_cache.values())
+        if force:
+            cids_to_announce = list(all_cids)
+        else:
+            cids_to_announce = [cid for cid in all_cids if cid not in self._announced_cache]
+
+        already_announced = len(all_cids) - len(cids_to_announce)
+        logger.info(f"CIDs to announce: {len(cids_to_announce)} (already announced: {already_announced})")
+
+        if not cids_to_announce:
+            logger.info("No CIDs need announcing")
+            return (0, 0, already_announced)
+
+        # Initialize progress
+        self._announce_progress = {
+            "active": True,
+            "total": len(cids_to_announce) + already_announced,
+            "announced": 0,
+            "failed": 0,
+            "skipped": already_announced,
+            "started_at": time.time(),
+        }
+
+        semaphore = trio.Semaphore(concurrency)
+        counters = {"announced": 0, "failed": 0}
+
+        async def announce_one(cid: str) -> None:
+            async with semaphore:
+                success = await self.announce_to_dht(cid)
+                if success:
+                    counters["announced"] += 1
+                else:
+                    counters["failed"] += 1
+
+        # Run announcements
+        async with trio.open_nursery() as nursery:
+            for cid in cids_to_announce:
+                nursery.start_soon(announce_one, cid)
+
+        # Save announced cache
+        if self._announced_dirty:
+            self._save_announced_cache()
+
+        # Mark complete
+        self._announce_progress["active"] = False
+
+        logger.info(
+            f"DHT announcement complete: {counters['announced']} announced, "
+            f"{counters['failed']} failed, {already_announced} already announced"
+        )
+        return (counters["announced"], counters["failed"], already_announced)
 
     async def check_ipfs_has(self, cid: str) -> bool:
         """
@@ -720,9 +863,6 @@ class IPFSStore(Store):
             self._cid_cache[hsh] = cid
             self._mark_dirty()
             logger.info(f"Published {hsh} to IPFS: {cid}")
-
-            # Announce to DHT for discoverability across NAT
-            await self.announce_to_dht(cid)
 
         return cid
 

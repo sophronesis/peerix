@@ -279,6 +279,71 @@ async def scan_status(req: Request) -> Response:
     return JSONResponse(progress)
 
 
+@app.route("/announce-status")
+async def announce_status(req: Request) -> Response:
+    """Get current DHT announcement progress."""
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled", "active": False}, status_code=404)
+
+    progress = ipfs_access["store"].get_announce_progress()
+    return JSONResponse(progress)
+
+
+@app.route("/announce", methods=["POST"])
+async def start_dht_announce(req: Request) -> Response:
+    """
+    Start DHT announcement phase for all cached CIDs.
+
+    Localhost only. Announces all CIDs to DHT for discoverability.
+    Query params:
+        force: Re-announce even if already announced (default: false)
+        concurrency: Max parallel announcements (default: 5)
+    """
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+
+    store = ipfs_access["store"]
+
+    # Check if already running
+    if store._announce_progress.get("active"):
+        return JSONResponse({
+            "error": "Announcement already in progress",
+            "progress": store.get_announce_progress(),
+        }, status_code=409)
+
+    # Parse params
+    force = req.query_params.get("force", "false").lower() == "true"
+    concurrency = int(req.query_params.get("concurrency", "5"))
+
+    # Start announcement in background
+    async def run_announce():
+        await store.announce_all_to_dht(concurrency=concurrency, force=force)
+
+    import trio
+    nursery = ipfs_access.get("nursery")
+    if nursery:
+        nursery.start_soon(run_announce)
+        return JSONResponse({
+            "status": "started",
+            "force": force,
+            "concurrency": concurrency,
+        })
+    else:
+        # No nursery, run synchronously
+        announced, failed, skipped = await store.announce_all_to_dht(
+            concurrency=concurrency, force=force
+        )
+        return JSONResponse({
+            "status": "completed",
+            "announced": announced,
+            "failed": failed,
+            "skipped": skipped,
+        })
+
+
 @app.route("/publish/{hash:str}", methods=["POST"])
 async def publish_to_ipfs(req: Request) -> Response:
     """
@@ -460,9 +525,14 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             <div class="value warning" id="skipped">--</div>
         </div>
         <div class="card">
-            <h2>DHT Announced</h2>
-            <div class="value" id="dht-announced">--</div>
-            <div style="font-size: 12px; color: #666; margin-top: 4px;">Total: <span id="dht-total">--</span></div>
+            <h2>DHT Announcement</h2>
+            <div class="value" id="announce-percent">--</div>
+            <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>
+            <div class="eta" id="announce-eta"></div>
+            <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                <span id="announce-announced">0</span> announced,
+                <span id="announce-pending">0</span> pending
+            </div>
         </div>
         <div class="card">
             <h2>CID Cache Size</h2>
@@ -491,17 +561,19 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
     <script>
         async function update() {
             try {
-                const [scanResp, statsResp] = await Promise.all([
+                const [scanResp, statsResp, announceResp] = await Promise.all([
                     fetch('/scan-status'),
-                    fetch('/dashboard-stats')
+                    fetch('/dashboard-stats'),
+                    fetch('/announce-status')
                 ]);
 
-                if (!scanResp.ok || !statsResp.ok) {
+                if (!scanResp.ok || !statsResp.ok || !announceResp.ok) {
                     throw new Error('Failed to fetch data');
                 }
 
                 const scan = await scanResp.json();
                 const stats = await statsResp.json();
+                const announce = await announceResp.json();
 
                 document.getElementById('error').style.display = 'none';
 
@@ -515,8 +587,34 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('tracker').textContent = scan.from_tracker || 0;
                 document.getElementById('cached').textContent = scan.already_cached || 0;
                 document.getElementById('skipped').textContent = scan.skipped || 0;
-                document.getElementById('dht-announced').textContent = scan.dht_announced || 0;
-                document.getElementById('dht-total').textContent = stats.total_dht_announced || 0;
+
+                // Announcement progress
+                const announcePercent = announce.percent || 0;
+                document.getElementById('announce-percent').textContent = announcePercent.toFixed(1) + '%';
+                document.getElementById('announce-bar').style.width = announcePercent + '%';
+                document.getElementById('announce-announced').textContent = announce.announced || 0;
+                document.getElementById('announce-pending').textContent = announce.pending || 0;
+
+                // Announcement ETA
+                const announceEtaEl = document.getElementById('announce-eta');
+                if (announce.active && announce.eta_seconds) {
+                    const eta = announce.eta_seconds;
+                    let etaText;
+                    if (eta < 60) {
+                        etaText = Math.round(eta) + 's remaining';
+                    } else if (eta < 3600) {
+                        const mins = Math.floor(eta / 60);
+                        const secs = Math.round(eta % 60);
+                        etaText = mins + 'm ' + secs + 's remaining';
+                    } else {
+                        const hours = Math.floor(eta / 3600);
+                        const mins = Math.floor((eta % 3600) / 60);
+                        etaText = hours + 'h ' + mins + 'm remaining';
+                    }
+                    announceEtaEl.textContent = etaText;
+                } else {
+                    announceEtaEl.textContent = announce.active ? 'Starting...' : '';
+                }
 
                 // ETA
                 const etaEl = document.getElementById('eta');
