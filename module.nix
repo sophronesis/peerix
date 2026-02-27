@@ -383,13 +383,14 @@ in
       systemd.services.peerix.wants = [ "ipfs.service" ];
 
       # Resource Manager limits file (Kubo 0.19+ uses separate file instead of config)
+      # Note: ConnsInbound must be > ConnMgr.HighWater
       environment.etc."ipfs-resource-limits.json" = {
         text = builtins.toJSON {
           System = {
-            ConnsInbound = 5;
-            ConnsOutbound = 5;
-            StreamsInbound = 10;
-            StreamsOutbound = 10;
+            ConnsInbound = 10;
+            ConnsOutbound = 10;
+            StreamsInbound = 20;
+            StreamsOutbound = 20;
             Memory = 536870912;  # 512MB
           };
         };
