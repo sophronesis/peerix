@@ -370,19 +370,8 @@ in
             HighWater = 50;  # Hard limit (default is 900!)
             GracePeriod = "30s";
           };
-          # Resource Manager - stricter limits, applies BEFORE connections establish
-          Swarm.ResourceMgr = {
-            Enabled = true;
-            Limits = {
-              System = {
-                ConnsInbound = 5;
-                ConnsOutbound = 5;
-                StreamsInbound = 10;
-                StreamsOutbound = 10;
-                Memory = 536870912;  # 512MB
-              };
-            };
-          };
+          # Resource Manager - enable it (limits are in separate file for Kubo 0.19+)
+          Swarm.ResourceMgr.Enabled = true;
           # Disable QUIC to reduce UDP flood (Telekom handles TCP better)
           Swarm.Transports.Network.QUIC = false;
         };
@@ -391,6 +380,25 @@ in
       # Ensure peerix starts after kubo
       systemd.services.peerix.after = [ "ipfs.service" ];
       systemd.services.peerix.wants = [ "ipfs.service" ];
+
+      # Resource Manager limits file (Kubo 0.19+ uses separate file instead of config)
+      environment.etc."ipfs-resource-limits.json" = {
+        text = builtins.toJSON {
+          System = {
+            ConnsInbound = 5;
+            ConnsOutbound = 5;
+            StreamsInbound = 10;
+            StreamsOutbound = 10;
+            Memory = 536870912;  # 512MB
+          };
+        };
+        mode = "0644";
+      };
+
+      # Copy limits file to IPFS data dir before service starts
+      systemd.services.ipfs.preStart = lib.mkAfter ''
+        cp /etc/ipfs-resource-limits.json /var/lib/ipfs/libp2p-resource-limit-overrides.json || true
+      '';
     })
 
     # IPFS rate limiting via iptables
