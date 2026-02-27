@@ -100,3 +100,16 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 Python: `trio`, `hypercorn`, `starlette`, `psutil`, `httpx`, `pynacl` (optional, for narinfo signing)
 IPFS mode: `httpx`, `trio`, local IPFS daemon (kubo)
 System: `nix`, `nix-serve` (both must be on PATH)
+
+## Deployment
+
+If `./deploy` script exists in the project root, **always use it** for deploying to servers:
+
+```bash
+./deploy do           # Deploy to DO server
+./deploy fw16         # Deploy to FW16 (local)
+./deploy remote-nixos # Deploy to remote-nixos
+./deploy all          # Deploy to all servers
+```
+
+The deploy script handles flake updates and uses the correct rebuild commands for each target. Never run nixos-rebuild commands directly on remote servers.
