@@ -519,26 +519,6 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             </div>
         </div>
         <div class="card">
-            <h2>Published to IPFS</h2>
-            <div class="value success" id="published">--</div>
-        </div>
-        <div class="card">
-            <h2>From Tracker</h2>
-            <div class="value" id="tracker">--</div>
-        </div>
-        <div class="card">
-            <h2>Already Cached</h2>
-            <div class="value" id="cached">--</div>
-        </div>
-        <div class="card">
-            <h2>Skipped</h2>
-            <div class="value warning" id="skipped">--</div>
-        </div>
-        <div class="card">
-            <h2>CID Cache Size</h2>
-            <div class="value" id="cache-size">--</div>
-        </div>
-        <div class="card">
             <h2>Status</h2>
             <div class="status-row">
                 <span class="status-label">Mode</span>
@@ -553,8 +533,35 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-value" id="scan-active">--</span>
             </div>
             <div class="status-row">
+                <span class="status-label">Announcing</span>
+                <span class="status-value" id="announce-active">--</span>
+            </div>
+            <div class="status-row">
                 <span class="status-label">Tracker</span>
                 <span class="status-value" id="tracker-url" style="font-size: 0.8em;">--</span>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Stats</h2>
+            <div class="status-row">
+                <span class="status-label">CID Cache</span>
+                <span class="status-value" id="cache-size">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Published</span>
+                <span class="status-value" id="published">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">From Tracker</span>
+                <span class="status-value" id="tracker">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Already Cached</span>
+                <span class="status-value" id="cached">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Skipped</span>
+                <span class="status-value" id="skipped">--</span>
             </div>
         </div>
     </div>
@@ -676,6 +683,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 } else {
                     activeEl.textContent = 'No';
                     activeEl.style.color = '#888';
+                }
+
+                // Announce active
+                const announceActiveEl = document.getElementById('announce-active');
+                if (announce.active) {
+                    announceActiveEl.textContent = 'Yes';
+                    announceActiveEl.style.color = '#ff9500';
+                } else {
+                    announceActiveEl.textContent = 'No';
+                    announceActiveEl.style.color = '#888';
                 }
 
                 // Tracker URL
