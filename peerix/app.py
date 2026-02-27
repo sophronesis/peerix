@@ -460,6 +460,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             <div class="value warning" id="skipped">--</div>
         </div>
         <div class="card">
+            <h2>DHT Announced</h2>
+            <div class="value" id="dht-announced">--</div>
+            <div style="font-size: 12px; color: #666; margin-top: 4px;">Total: <span id="dht-total">--</span></div>
+        </div>
+        <div class="card">
             <h2>CID Cache Size</h2>
             <div class="value" id="cache-size">--</div>
         </div>
@@ -510,6 +515,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('tracker').textContent = scan.from_tracker || 0;
                 document.getElementById('cached').textContent = scan.already_cached || 0;
                 document.getElementById('skipped').textContent = scan.skipped || 0;
+                document.getElementById('dht-announced').textContent = scan.dht_announced || 0;
+                document.getElementById('dht-total').textContent = stats.total_dht_announced || 0;
 
                 // ETA
                 const etaEl = document.getElementById('eta');
@@ -601,6 +608,7 @@ async def dashboard_stats(req: Request) -> Response:
         "mode": "ipfs" if ipfs_access else "lan",
         "cid_cache_size": 0,
         "skipped_cache_size": 0,
+        "total_dht_announced": 0,
         "ipfs_available": False,
         "tracker_url": None,
     }
@@ -609,6 +617,7 @@ async def dashboard_stats(req: Request) -> Response:
         store = ipfs_access["store"]
         stats["cid_cache_size"] = len(store._cid_cache)
         stats["skipped_cache_size"] = len(store._skipped_cache)
+        stats["total_dht_announced"] = store._total_dht_announced
 
         # Get tracker URL if configured
         tracker_client = ipfs_access.get("tracker_client")

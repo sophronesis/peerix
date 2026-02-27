@@ -77,10 +77,13 @@ class IPFSStore(Store):
             "from_tracker": 0,
             "skipped": 0,
             "already_cached": 0,
+            "dht_announced": 0,
             "current_hash": None,
             "current_path": None,
             "started_at": None,
         }
+        # Total DHT announcements (persists across scans)
+        self._total_dht_announced: int = 0
         # Kalman filter state for rate smoothing
         self._kalman_rate: float = 0.0  # Estimated rate
         self._kalman_p: float = 1000.0  # Estimate uncertainty
@@ -524,6 +527,9 @@ class IPFSStore(Store):
             )
             if resp.status_code == 200:
                 logger.debug(f"Announced to DHT: {cid}")
+                self._total_dht_announced += 1
+                if self._scan_progress["active"]:
+                    self._scan_progress["dht_announced"] += 1
                 return True
             else:
                 logger.warning(f"DHT announcement failed for {cid}: {resp.status_code}")
@@ -780,6 +786,7 @@ class IPFSStore(Store):
             "from_tracker": 0,
             "skipped": 0,
             "already_cached": 0,
+            "dht_announced": 0,
             "current_hash": None,
             "current_path": None,
             "started_at": time.time(),
