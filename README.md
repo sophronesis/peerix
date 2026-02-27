@@ -8,27 +8,21 @@ Quick Start
 
 ### IPFS Mode (default)
 
-Uses local IPFS daemon for content-addressed NAR distribution:
+Uses local IPFS daemon for content-addressed NAR distribution.
+
+Add to `flake.nix` inputs:
 
 ```nix
-{
-  inputs.peerix.url = "github:sophronesis/peerix";
+inputs.peerix.url = "github:sophronesis/peerix";
+```
 
-  outputs = { self, nixpkgs, peerix, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      modules = [
-        peerix.nixosModules.peerix
-        {
-          services.kubo.enable = true;  # IPFS daemon
-          services.peerix = {
-            enable = true;
-            trackerUrl = "http://tracker-host:12305";
-          };
-        }
-      ];
-    };
-  };
-}
+Add `peerix.nixosModules.peerix` to your modules, then in `configuration.nix`:
+
+```nix
+services.peerix = {
+  enable = true;
+  # trackerUrl = "http://your-tracker:12305";  # defaults to sophronesis.dev/peerix
+};
 ```
 
 ### LAN Mode
