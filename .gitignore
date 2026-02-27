@@ -162,3 +162,4 @@ test-vm/opencv-custom.nix
 # Secrets
 *.pem
 deploy
+scripts/test_ipfs_distribution.sh
