@@ -140,16 +140,25 @@ class IPFSStore(Store):
             elapsed = now - progress["started_at"]
             remaining = progress["total"] - progress["processed"]
 
-            # Initialize Kalman with cumulative rate
-            if self._kalman_rate <= 0 and elapsed > 0:
-                self._kalman_rate = progress["processed"] / elapsed
-                self._kalman_last_time = now
-                self._kalman_last_processed = progress["processed"]
+            # Work items = items that required actual work (not instant cache hits)
+            work_items = progress["published"] + progress["from_tracker"] + progress["skipped"]
 
-            # Kalman filter update
+            # Wait for enough work items before initializing Kalman
+            min_items = 50
+            min_seconds = 5.0
+            if self._kalman_rate <= 0:
+                if elapsed >= min_seconds and work_items >= min_items:
+                    self._kalman_rate = work_items / elapsed
+                    self._kalman_last_time = now
+                    self._kalman_last_processed = work_items
+                else:
+                    # Not enough data yet, don't show ETA
+                    return progress
+
+            # Kalman filter update based on work items only
             dt = now - self._kalman_last_time if self._kalman_last_time > 0 else 0
             if dt > 0.1:
-                items_delta = progress["processed"] - self._kalman_last_processed
+                items_delta = work_items - self._kalman_last_processed
                 measured_rate = items_delta / dt if dt > 0 else self._kalman_rate
 
                 # Predict step
@@ -162,11 +171,17 @@ class IPFSStore(Store):
                 self._kalman_rate = max(1.0, self._kalman_rate)
 
                 self._kalman_last_time = now
-                self._kalman_last_processed = progress["processed"]
+                self._kalman_last_processed = work_items
+
+                # Store calculation details for transparency
+                progress["rate_calc"] = f"{items_delta}/{round(dt, 1)}s"
 
             if self._kalman_rate > 0:
-                progress["eta_seconds"] = round(remaining / self._kalman_rate, 1)
+                # ETA based on remaining work items (exclude already_cached from remaining)
+                remaining_work = remaining  # All remaining need processing
+                progress["eta_seconds"] = round(remaining_work / self._kalman_rate, 1)
                 progress["rate"] = round(self._kalman_rate, 1)
+                progress["work_items"] = work_items
 
         return progress
 
