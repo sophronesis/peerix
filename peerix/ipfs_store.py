@@ -88,6 +88,8 @@ class IPFSStore(Store):
         self._kalman_r: float = 2000.0  # Measurement noise (higher = smoother)
         self._kalman_last_time: float = 0.0
         self._kalman_last_processed: int = 0
+        self._rate_history: t.List[float] = []  # Recent rate measurements for STD
+        self._rate_history_max: int = 30  # Keep last N measurements
 
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
@@ -170,6 +172,11 @@ class IPFSStore(Store):
                 items_delta = work_items - self._kalman_last_processed
                 measured_rate = items_delta / dt if dt > 0 else self._kalman_rate
 
+                # Track rate history for STD calculation
+                self._rate_history.append(measured_rate)
+                if len(self._rate_history) > self._rate_history_max:
+                    self._rate_history.pop(0)
+
                 # Predict step
                 self._kalman_p += self._kalman_q
 
@@ -188,9 +195,19 @@ class IPFSStore(Store):
             if self._kalman_rate > 0:
                 # ETA based on remaining work items (exclude already_cached from remaining)
                 remaining_work = remaining  # All remaining need processing
-                progress["eta_seconds"] = round(remaining_work / self._kalman_rate, 1)
+                eta = remaining_work / self._kalman_rate
+                progress["eta_seconds"] = round(eta, 1)
                 progress["rate"] = round(self._kalman_rate, 1)
                 progress["work_items"] = work_items
+
+                # Calculate ETA error from rate STD (need at least 5 samples)
+                if len(self._rate_history) >= 5:
+                    import statistics
+                    rate_std = statistics.stdev(self._rate_history)
+                    # Error propagation: if rate has STD, ETA error ~ remaining * (rate_std / rate^2)
+                    if self._kalman_rate > 0:
+                        eta_error = remaining_work * rate_std / (self._kalman_rate ** 2)
+                        progress["eta_error_seconds"] = round(eta_error, 1)
 
         return progress
 
@@ -200,6 +217,7 @@ class IPFSStore(Store):
         self._kalman_p = 1000.0
         self._kalman_last_time = 0.0
         self._kalman_last_processed = 0
+        self._rate_history = []
 
     async def sync_cid_mappings_to_tracker(self) -> int:
         """
@@ -828,12 +846,24 @@ class IPFSStore(Store):
                     self._scan_progress["skipped"] = counters["skipped"]
                     self._scan_progress["processed"] += 1
 
+        # Periodic cache saver (every 60s during scan)
+        async def periodic_save() -> None:
+            while self._scan_progress["active"]:
+                await trio.sleep(60)
+                if self._cache_dirty:
+                    self._save_cache()
+                    logger.debug("Periodic save: CID cache")
+                if self._skipped_dirty:
+                    self._save_skipped_cache()
+                    logger.debug("Periodic save: skipped cache")
+
         # Process all hashes in parallel with limited concurrency
         async with trio.open_nursery() as nursery:
+            nursery.start_soon(periodic_save)
             for hsh in store_hashes:
                 nursery.start_soon(publish_one, hsh)
 
-        # Save caches if dirty
+        # Final save of caches
         if self._cache_dirty:
             self._save_cache()
         if self._skipped_dirty:
