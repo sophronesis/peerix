@@ -152,6 +152,49 @@ in
             Set to false if you want to manage kubo configuration yourself.
           '';
         };
+
+        rateLimit = {
+          enable = lib.mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Enable iptables-based rate limiting for IPFS connections.
+              This prevents IPFS from overwhelming your network during bursts of activity.
+              Applies limits to port 4001 (IPFS swarm port).
+            '';
+          };
+
+          connectionRate = lib.mkOption {
+            type = types.int;
+            default = 10;
+            description = ''
+              Maximum NEW outgoing TCP connections per second.
+              Prevents connection flood during startup or heavy activity.
+              Default: 10/sec.
+            '';
+          };
+
+          connectionBurst = lib.mkOption {
+            type = types.int;
+            default = 20;
+            description = ''
+              Burst allowance for new connections.
+              Allows short bursts above connectionRate.
+              Default: 20.
+            '';
+          };
+
+          packetRate = lib.mkOption {
+            type = types.int;
+            default = 1400;
+            description = ''
+              Maximum packets per second for IPFS traffic (both TCP and UDP).
+              At 1500 byte MTU, 1400 packets/sec ≈ 2 MiB/s.
+              Set to 0 to disable bandwidth limiting (only apply connection limiting).
+              Default: 1400 (~2 MiB/s).
+            '';
+          };
+        };
       };
     };
 
@@ -315,6 +358,58 @@ in
       # Ensure peerix starts after kubo
       systemd.services.peerix.after = [ "ipfs.service" ];
       systemd.services.peerix.wants = [ "ipfs.service" ];
+    })
+
+    # IPFS rate limiting via iptables
+    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.rateLimit.enable) {
+      networking.firewall.extraCommands = let
+        connRate = toString cfg.ipfs.rateLimit.connectionRate;
+        connBurst = toString cfg.ipfs.rateLimit.connectionBurst;
+        pktRate = toString cfg.ipfs.rateLimit.packetRate;
+        bandwidthRules = lib.optionalString (cfg.ipfs.rateLimit.packetRate > 0) ''
+          # Limit outgoing IPFS bandwidth
+          iptables -A OUTPUT -p tcp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out -j DROP
+          iptables -A OUTPUT -p udp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out_udp -j DROP
+
+          # Limit incoming IPFS bandwidth
+          iptables -A INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP
+          iptables -A INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP
+        '';
+        cleanupBandwidthRules = lib.optionalString (cfg.ipfs.rateLimit.packetRate > 0) ''
+          iptables -D OUTPUT -p tcp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out -j DROP 2>/dev/null || true
+          iptables -D OUTPUT -p udp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out_udp -j DROP 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP 2>/dev/null || true
+          iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
+        '';
+      in ''
+        # Clean up existing IPFS rate limit rules (peerix)
+        iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
+        ${cleanupBandwidthRules}
+
+        # Limit NEW outgoing connections (prevents startup flood)
+        iptables -A OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT
+        iptables -A OUTPUT -p tcp --sport 4001 --syn -j DROP
+
+        ${bandwidthRules}
+      '';
+
+      networking.firewall.extraStopCommands = let
+        connRate = toString cfg.ipfs.rateLimit.connectionRate;
+        connBurst = toString cfg.ipfs.rateLimit.connectionBurst;
+        pktRate = toString cfg.ipfs.rateLimit.packetRate;
+        bandwidthCleanup = lib.optionalString (cfg.ipfs.rateLimit.packetRate > 0) ''
+          iptables -D OUTPUT -p tcp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out -j DROP 2>/dev/null || true
+          iptables -D OUTPUT -p udp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out_udp -j DROP 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP 2>/dev/null || true
+          iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
+        '';
+      in ''
+        # Clean up IPFS rate limit rules on firewall stop (peerix)
+        iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
+        ${bandwidthCleanup}
+      '';
     })
 
     (lib.mkIf (tcfg.enable) {

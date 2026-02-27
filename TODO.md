@@ -10,6 +10,10 @@
   - Use `systemctl reload peerix` to trigger store rescan
   - Sends SIGHUP to trigger scan_and_publish + CID sync
 
+## Dashboard / HTTP API
+
+- [ ] Add pause scan option from dashboard
+
 ## Code Cleanup
 
 - [x] Remove WAN, both, libp2p, hybrid modes - keep only lan and ipfs
