@@ -364,10 +364,11 @@ in
           # CORS headers for API access
           API.HTTPHeaders."Access-Control-Allow-Origin" = [ "*" ];
           # Connection manager - limit connections to prevent network saturation
+          # Note: must be <= ResourceMgr limits
           Swarm.ConnMgr = {
             Type = "basic";
-            LowWater = 20;   # Start pruning at this many connections
-            HighWater = 50;  # Hard limit (default is 900!)
+            LowWater = 3;    # Start pruning at this many connections
+            HighWater = 5;   # Hard limit (must be <= ResourceMgr.ConnsInbound)
             GracePeriod = "30s";
           };
           # Resource Manager - enable it (limits are in separate file for Kubo 0.19+)
