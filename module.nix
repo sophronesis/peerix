@@ -404,14 +404,15 @@ in
         '';
       in ''
         # Clean up existing IPFS rate limit rules (peerix)
-        iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
-        iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --dport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --dport 4001 --syn -j DROP 2>/dev/null || true
         ${cleanupBandwidthRules}
         ${cleanupConnlimitRules}
 
         # Limit NEW outgoing connections (prevents startup flood)
-        iptables -A OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT
-        iptables -A OUTPUT -p tcp --sport 4001 --syn -j DROP
+        # --dport 4001 for outgoing connections TO IPFS peers
+        iptables -A OUTPUT -p tcp --dport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT
+        iptables -A OUTPUT -p tcp --dport 4001 --syn -j DROP
 
         ${bandwidthRules}
         ${connlimitRules}
@@ -434,8 +435,8 @@ in
         '';
       in ''
         # Clean up IPFS rate limit rules on firewall stop (peerix)
-        iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
-        iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --dport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
+        iptables -D OUTPUT -p tcp --dport 4001 --syn -j DROP 2>/dev/null || true
         ${bandwidthCleanup}
         ${connlimitCleanup}
       '';
