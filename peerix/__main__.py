@@ -88,7 +88,7 @@ serve_parser.add_argument("--private-key", required=False)
 serve_parser.add_argument("--timeout", type=int, default=50)
 serve_parser.add_argument("--mode", choices=["lan", "ipfs"], default="ipfs",
                     help="Discovery mode: ipfs (IPFS-based, default) or lan (UDP broadcast)")
-serve_parser.add_argument("--tracker-url", default=None,
+serve_parser.add_argument("--tracker-url", default="https://sophronesis.dev/peerix",
                     help="URL of the peerix tracker for CID registry (used in IPFS mode)")
 serve_parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
@@ -108,7 +108,7 @@ parser.add_argument("--private-key", required=False)
 parser.add_argument("--timeout", type=int, default=50)
 parser.add_argument("--mode", choices=["lan", "ipfs"], default="ipfs",
                     help="Discovery mode: ipfs (IPFS-based, default) or lan (UDP broadcast)")
-parser.add_argument("--tracker-url", default=None,
+parser.add_argument("--tracker-url", default="https://sophronesis.dev/peerix",
                     help="URL of the peerix tracker for CID registry (used in IPFS mode)")
 parser.add_argument("--scan-interval", type=int, default=3600,
                     help="Interval in seconds for periodic nix store scanning (default: 3600 = 1 hour, 0 to disable)")
