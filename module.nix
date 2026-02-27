@@ -363,6 +363,15 @@ in
           Addresses.API = "/ip4/127.0.0.1/tcp/5001";
           # CORS headers for API access
           API.HTTPHeaders."Access-Control-Allow-Origin" = [ "*" ];
+          # Connection manager - limit connections to prevent network saturation
+          Swarm.ConnMgr = {
+            Type = "basic";
+            LowWater = 20;   # Start pruning at this many connections
+            HighWater = 50;  # Hard limit (default is 900!)
+            GracePeriod = "30s";
+          };
+          # Disable QUIC to reduce UDP flood (Telekom handles TCP better)
+          Swarm.Transports.Network.QUIC = false;
         };
       };
 
