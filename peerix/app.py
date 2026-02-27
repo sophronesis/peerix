@@ -616,8 +616,6 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset));
         }
 
-        // Cache for IP -> country lookups
-        const ipCountryCache = {};
         async function update() {
             try {
                 const [scanResp, statsResp, announceResp] = await Promise.all([
@@ -760,20 +758,9 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                             for (const peer of peers) {
                                 const tr = document.createElement('tr');
 
-                                // Flag cell (async lookup)
+                                // Flag cell (from server-side lookup)
                                 const flagTd = document.createElement('td');
-                                flagTd.textContent = '';
-                                if (!ipCountryCache[peer.addr]) {
-                                    fetch('https://ip-api.com/json/' + peer.addr + '?fields=countryCode')
-                                        .then(r => r.json())
-                                        .then(data => {
-                                            ipCountryCache[peer.addr] = data.countryCode || '';
-                                            flagTd.textContent = countryToFlag(ipCountryCache[peer.addr]);
-                                        })
-                                        .catch(() => {});
-                                } else {
-                                    flagTd.textContent = countryToFlag(ipCountryCache[peer.addr]);
-                                }
+                                flagTd.textContent = countryToFlag(peer.country || '');
                                 tr.appendChild(flagTd);
 
                                 // IP cell
@@ -853,9 +840,13 @@ async def dashboard_stats(req: Request) -> Response:
     return JSONResponse(stats)
 
 
+# Cache for IP -> country code lookups
+_ip_country_cache: dict = {}
+
+
 @app.route("/tracker-peers")
 async def tracker_peers(req: Request) -> Response:
-    """Proxy tracker peers endpoint to avoid CORS issues."""
+    """Proxy tracker peers endpoint and add country codes."""
     if ipfs_access is None:
         return JSONResponse({"peers": []})
 
@@ -868,7 +859,34 @@ async def tracker_peers(req: Request) -> Response:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{tracker_client.tracker_url}/peers")
             if resp.status_code == 200:
-                return JSONResponse(resp.json())
+                data = resp.json()
+                peers = data.get("peers", [])
+
+                # Get unique IPs that need lookup
+                ips_to_lookup = [
+                    p["addr"] for p in peers
+                    if p["addr"] not in _ip_country_cache
+                ]
+
+                # Batch lookup country codes (ip-api.com allows batch via POST)
+                if ips_to_lookup:
+                    try:
+                        geo_resp = await client.post(
+                            "http://ip-api.com/batch?fields=query,countryCode",
+                            json=[{"query": ip} for ip in ips_to_lookup[:100]],
+                            timeout=5.0,
+                        )
+                        if geo_resp.status_code == 200:
+                            for item in geo_resp.json():
+                                _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
+                    except Exception:
+                        pass
+
+                # Add country code to each peer
+                for peer in peers:
+                    peer["country"] = _ip_country_cache.get(peer["addr"], "")
+
+                return JSONResponse({"peers": peers})
     except Exception:
         pass
 
