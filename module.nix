@@ -194,6 +194,17 @@ in
               Default: 1400 (~2 MiB/s).
             '';
           };
+
+          maxConnections = lib.mkOption {
+            type = types.int;
+            default = 100;
+            description = ''
+              Maximum concurrent outgoing connections to IPFS peers (port 4001).
+              Uses connlimit to cap total active connections.
+              Set to 0 to disable concurrent connection limiting.
+              Default: 100.
+            '';
+          };
         };
       };
     };
@@ -366,6 +377,7 @@ in
         connRate = toString cfg.ipfs.rateLimit.connectionRate;
         connBurst = toString cfg.ipfs.rateLimit.connectionBurst;
         pktRate = toString cfg.ipfs.rateLimit.packetRate;
+        maxConn = toString cfg.ipfs.rateLimit.maxConnections;
         bandwidthRules = lib.optionalString (cfg.ipfs.rateLimit.packetRate > 0) ''
           # Limit outgoing IPFS bandwidth
           iptables -A OUTPUT -p tcp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out -j DROP
@@ -381,34 +393,51 @@ in
           iptables -D INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP 2>/dev/null || true
           iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
         '';
+        connlimitRules = lib.optionalString (cfg.ipfs.rateLimit.maxConnections > 0) ''
+          # Limit concurrent outgoing connections
+          iptables -A OUTPUT -p tcp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP
+          iptables -A OUTPUT -p udp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP
+        '';
+        cleanupConnlimitRules = lib.optionalString (cfg.ipfs.rateLimit.maxConnections > 0) ''
+          iptables -D OUTPUT -p tcp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
+          iptables -D OUTPUT -p udp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
+        '';
       in ''
         # Clean up existing IPFS rate limit rules (peerix)
         iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
         iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
         ${cleanupBandwidthRules}
+        ${cleanupConnlimitRules}
 
         # Limit NEW outgoing connections (prevents startup flood)
         iptables -A OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT
         iptables -A OUTPUT -p tcp --sport 4001 --syn -j DROP
 
         ${bandwidthRules}
+        ${connlimitRules}
       '';
 
       networking.firewall.extraStopCommands = let
         connRate = toString cfg.ipfs.rateLimit.connectionRate;
         connBurst = toString cfg.ipfs.rateLimit.connectionBurst;
         pktRate = toString cfg.ipfs.rateLimit.packetRate;
+        maxConn = toString cfg.ipfs.rateLimit.maxConnections;
         bandwidthCleanup = lib.optionalString (cfg.ipfs.rateLimit.packetRate > 0) ''
           iptables -D OUTPUT -p tcp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out -j DROP 2>/dev/null || true
           iptables -D OUTPUT -p udp --sport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode srcip --hashlimit-name ipfs_out_udp -j DROP 2>/dev/null || true
           iptables -D INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP 2>/dev/null || true
           iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
         '';
+        connlimitCleanup = lib.optionalString (cfg.ipfs.rateLimit.maxConnections > 0) ''
+          iptables -D OUTPUT -p tcp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
+          iptables -D OUTPUT -p udp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
+        '';
       in ''
         # Clean up IPFS rate limit rules on firewall stop (peerix)
         iptables -D OUTPUT -p tcp --sport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
         iptables -D OUTPUT -p tcp --sport 4001 --syn -j DROP 2>/dev/null || true
         ${bandwidthCleanup}
+        ${connlimitCleanup}
       '';
     })
 
