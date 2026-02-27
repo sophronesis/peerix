@@ -495,6 +495,28 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             padding: 16px;
             color: #ff4444;
         }
+        .peers-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .peers-table th, .peers-table td {
+            padding: 6px 8px;
+            text-align: left;
+            border-bottom: 1px solid #333;
+        }
+        .peers-table th {
+            color: #888;
+            font-weight: normal;
+        }
+        .peers-table td:first-child {
+            width: 30px;
+            text-align: center;
+        }
+        .peers-table .peer-id {
+            font-family: monospace;
+            color: #666;
+        }
     </style>
 </head>
 <body>
@@ -571,8 +593,31 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-value" id="skipped">--</span>
             </div>
         </div>
+        <div class="card" id="tracker-card" style="display: none;">
+            <h2>Tracker Peers</h2>
+            <table class="peers-table">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>IP</th>
+                        <th>Peer ID</th>
+                    </tr>
+                </thead>
+                <tbody id="peers-body">
+                </tbody>
+            </table>
+        </div>
     </div>
     <script>
+        // Country code to flag emoji
+        function countryToFlag(code) {
+            if (!code || code.length !== 2) return '';
+            const offset = 127397;
+            return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset));
+        }
+
+        // Cache for IP -> country lookups
+        const ipCountryCache = {};
         async function update() {
             try {
                 const [scanResp, statsResp, announceResp] = await Promise.all([
@@ -696,12 +741,63 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
                 // Tracker URL
                 const trackerEl = document.getElementById('tracker-url');
+                const trackerCard = document.getElementById('tracker-card');
                 if (stats.tracker_url) {
                     trackerEl.textContent = stats.tracker_url;
                     trackerEl.style.color = '#00d9ff';
+
+                    // Fetch tracker peers
+                    try {
+                        const peersResp = await fetch(stats.tracker_url + '/peers');
+                        if (peersResp.ok) {
+                            const peersData = await peersResp.json();
+                            const peers = peersData.peers || [];
+                            trackerCard.style.display = 'block';
+
+                            const tbody = document.getElementById('peers-body');
+                            tbody.innerHTML = '';
+
+                            for (const peer of peers) {
+                                const tr = document.createElement('tr');
+
+                                // Flag cell (async lookup)
+                                const flagTd = document.createElement('td');
+                                flagTd.textContent = '';
+                                if (!ipCountryCache[peer.addr]) {
+                                    fetch('https://ip-api.com/json/' + peer.addr + '?fields=countryCode')
+                                        .then(r => r.json())
+                                        .then(data => {
+                                            ipCountryCache[peer.addr] = data.countryCode || '';
+                                            flagTd.textContent = countryToFlag(ipCountryCache[peer.addr]);
+                                        })
+                                        .catch(() => {});
+                                } else {
+                                    flagTd.textContent = countryToFlag(ipCountryCache[peer.addr]);
+                                }
+                                tr.appendChild(flagTd);
+
+                                // IP cell
+                                const ipTd = document.createElement('td');
+                                ipTd.textContent = peer.addr;
+                                tr.appendChild(ipTd);
+
+                                // Peer ID cell
+                                const peerTd = document.createElement('td');
+                                peerTd.className = 'peer-id';
+                                peerTd.textContent = peer.peer_id.substring(0, 8) + '...';
+                                tr.appendChild(peerTd);
+
+                                tbody.appendChild(tr);
+                            }
+                        }
+                    } catch (e) {
+                        // Tracker fetch failed, hide card
+                        trackerCard.style.display = 'none';
+                    }
                 } else {
                     trackerEl.textContent = 'Not configured';
                     trackerEl.style.color = '#888';
+                    trackerCard.style.display = 'none';
                 }
 
             } catch (e) {
