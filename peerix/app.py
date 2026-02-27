@@ -746,9 +746,9 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     trackerEl.textContent = stats.tracker_url;
                     trackerEl.style.color = '#00d9ff';
 
-                    // Fetch tracker peers
+                    // Fetch tracker peers (via local proxy to avoid CORS)
                     try {
-                        const peersResp = await fetch(stats.tracker_url + '/peers');
+                        const peersResp = await fetch('/tracker-peers');
                         if (peersResp.ok) {
                             const peersData = await peersResp.json();
                             const peers = peersData.peers || [];
@@ -851,6 +851,28 @@ async def dashboard_stats(req: Request) -> Response:
             stats["ipfs_available"] = False
 
     return JSONResponse(stats)
+
+
+@app.route("/tracker-peers")
+async def tracker_peers(req: Request) -> Response:
+    """Proxy tracker peers endpoint to avoid CORS issues."""
+    if ipfs_access is None:
+        return JSONResponse({"peers": []})
+
+    tracker_client = ipfs_access.get("tracker_client")
+    if tracker_client is None:
+        return JSONResponse({"peers": []})
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{tracker_client.tracker_url}/peers")
+            if resp.status_code == 200:
+                return JSONResponse(resp.json())
+    except Exception:
+        pass
+
+    return JSONResponse({"peers": []})
 
 
 @app.route("/batch-narinfo", methods=["POST"])
