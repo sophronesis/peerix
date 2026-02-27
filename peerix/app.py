@@ -418,6 +418,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Scan Active</span>
                 <span class="status-value" id="scan-active">--</span>
             </div>
+            <div class="status-row">
+                <span class="status-label">Tracker</span>
+                <span class="status-value" id="tracker-url" style="font-size: 0.8em;">--</span>
+            </div>
         </div>
     </div>
     <script>
@@ -502,6 +506,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     activeEl.style.color = '#888';
                 }
 
+                // Tracker URL
+                const trackerEl = document.getElementById('tracker-url');
+                if (stats.tracker_url) {
+                    trackerEl.textContent = stats.tracker_url;
+                    trackerEl.style.color = '#00d9ff';
+                } else {
+                    trackerEl.textContent = 'Not configured';
+                    trackerEl.style.color = '#888';
+                }
+
             } catch (e) {
                 document.getElementById('error').textContent = 'Error: ' + e.message;
                 document.getElementById('error').style.display = 'block';
@@ -527,12 +541,20 @@ async def dashboard_stats(req: Request) -> Response:
     stats = {
         "mode": "ipfs" if ipfs_access else "lan",
         "cid_cache_size": 0,
+        "skipped_cache_size": 0,
         "ipfs_available": False,
+        "tracker_url": None,
     }
 
     if ipfs_access is not None:
         store = ipfs_access["store"]
         stats["cid_cache_size"] = len(store._cid_cache)
+        stats["skipped_cache_size"] = len(store._skipped_cache)
+
+        # Get tracker URL if configured
+        tracker_client = ipfs_access.get("tracker_client")
+        if tracker_client is not None:
+            stats["tracker_url"] = tracker_client.tracker_url
 
         # Check IPFS daemon connectivity
         try:
