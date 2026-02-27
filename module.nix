@@ -373,12 +373,14 @@ in
           # Resource Manager - stricter limits, applies BEFORE connections establish
           Swarm.ResourceMgr = {
             Enabled = true;
-            Limits.System = {
-              ConnsInbound = 5;
-              ConnsOutbound = 5;
-              StreamsInbound = 10;
-              StreamsOutbound = 10;
-              Memory = 536870912;  # 512MB
+            Limits = {
+              System = {
+                ConnsInbound = 5;
+                ConnsOutbound = 5;
+                StreamsInbound = 10;
+                StreamsOutbound = 10;
+                Memory = 536870912;  # 512MB
+              };
             };
           };
           # Disable QUIC to reduce UDP flood (Telekom handles TCP better)
