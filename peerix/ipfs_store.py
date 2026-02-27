@@ -501,6 +501,37 @@ class IPFSStore(Store):
             logger.debug(f"IPFS streaming fetch error for {cid}: {e}")
             return None
 
+    async def announce_to_dht(self, cid: str) -> bool:
+        """
+        Announce content to the IPFS DHT for discoverability.
+
+        This is crucial for content to be found by peers behind NAT.
+        Uses routing/provide API to publish provider records to the DHT.
+
+        Args:
+            cid: The content ID to announce
+
+        Returns:
+            True if announcement succeeded, False otherwise
+        """
+        try:
+            client = await self._get_client()
+            # routing/provide announces our peer as a provider for this CID
+            resp = await client.post(
+                f"{self.api_url}/routing/provide",
+                params={"arg": cid},
+                timeout=30.0,  # DHT operations can be slow
+            )
+            if resp.status_code == 200:
+                logger.debug(f"Announced to DHT: {cid}")
+                return True
+            else:
+                logger.warning(f"DHT announcement failed for {cid}: {resp.status_code}")
+                return False
+        except Exception as e:
+            logger.warning(f"DHT announcement error for {cid}: {e}")
+            return False
+
     async def check_ipfs_has(self, cid: str) -> bool:
         """
         Check if content is available in IPFS network.
@@ -683,6 +714,9 @@ class IPFSStore(Store):
             self._cid_cache[hsh] = cid
             self._mark_dirty()
             logger.info(f"Published {hsh} to IPFS: {cid}")
+
+            # Announce to DHT for discoverability across NAT
+            await self.announce_to_dht(cid)
 
         return cid
 

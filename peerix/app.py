@@ -297,10 +297,14 @@ async def publish_to_ipfs(req: Request) -> Response:
 
     # Check if already in cache
     if hsh in store._cid_cache:
+        cid = store._cid_cache[hsh]
+        # Still announce to DHT (may have been cached before DHT announcement was added)
+        await store.announce_to_dht(cid)
         return JSONResponse({
             "status": "already_cached",
             "hash": hsh,
-            "cid": store._cid_cache[hsh],
+            "cid": cid,
+            "dht_announced": True,
         })
 
     # Publish to IPFS
