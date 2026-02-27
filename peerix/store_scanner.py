@@ -45,7 +45,7 @@ def compute_store_hash() -> str:
         return ""
 
 
-def scan_store_paths(limit: int = 1000, skip_derivations: bool = False) -> t.List[str]:
+def scan_store_paths(limit: int = 0, skip_derivations: bool = False) -> t.List[str]:
     """
     Scan the local nix store and return a list of store path hashes.
 
