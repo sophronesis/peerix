@@ -1,74 +1,14 @@
 Peerix
 ======
 
-Peerix is a peer-to-peer binary cache for nix derivations.
-Every participating node can pull derivations from each other instances' respective nix-stores.
+Peer-to-peer binary cache for Nix. Share derivations between machines via IPFS or local network broadcast.
 
 Quick Start
 -----------
 
 ### IPFS Mode (default)
 
-Uses local IPFS daemon for content-addressed NAR distribution. Requires IPFS (kubo):
-
-```nix
-services.kubo.enable = true;  # IPFS daemon
-services.peerix = {
-  enable = true;
-  trackerUrl = "http://tracker-host:12305";  # For CID registry
-};
-```
-
-### Run Your Own Tracker
-
-Host a tracker server for CID registry and peer discovery:
-
-```nix
-# On your server
-services.peerix-tracker.enable = true;
-
-# On clients
-services.peerix = {
-  enable = true;
-  trackerUrl = "http://your-server:12305";
-};
-```
-
-### LAN Only Mode
-
-For local network only (no internet/tracker required):
-
-```nix
-services.peerix = {
-  enable = true;
-  mode = "lan";
-};
-```
-
-How does it work?
------------------
-
-Peerix implements a nix binary cache. When the nix package manager queries peerix, peerix
-will ask the network if any other peerix instances hold the package, and if some other instance
-holds the derivation, it will download the derivation from that instance.
-
-Store path hashes are verified against `cache.nixos.org` by default, ensuring packages haven't been tampered with.
-
-Peerix supports multiple discovery modes:
-
-- **IPFS** (default): Uses the local IPFS daemon for content-addressed NAR distribution. CID mappings are registered with the tracker.
-- **LibP2P**: P2P networking with NAT traversal using libp2p (DHT, mDNS, hole punching).
-- **LAN**: UDP broadcast on the local network for zero-config peer discovery.
-- **WAN**: Tracker-based discovery for peers across different networks.
-- **Both**: LAN and WAN simultaneously.
-- **Hybrid**: LibP2P combined with tracker for maximum compatibility.
-
-Installation
-------------
-
-### Flake
-
-Add peerix as a flake input:
+Uses local IPFS daemon for content-addressed NAR distribution:
 
 ```nix
 {
@@ -78,275 +18,91 @@ Add peerix as a flake input:
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
         peerix.nixosModules.peerix
-        { services.peerix.enable = true; }
+        {
+          services.kubo.enable = true;  # IPFS daemon
+          services.peerix = {
+            enable = true;
+            trackerUrl = "http://tracker-host:12305";
+          };
+        }
       ];
     };
   };
 }
 ```
 
-### Signing
+### LAN Mode
 
-To sign the peerix cache, generate a key pair:
-
-```bash
-nix-store --generate-binary-cache-key myhost /path/to/cache-priv-key.pem /path/to/cache-pub-key.pem
-```
-
-Set `privateKeyFile` on the serving node and `publicKey` (or `publicKeyFile`) on consuming nodes so nix can verify signatures.
-
-Alternatively, set `NIX_SECRET_KEY_FILE` environment variable — peerix will sign narinfo responses with ed25519 directly (requires `pynacl`).
-
-Configuration Options
----------------------
-
-### Peerix Service
-
-| Option                           | Description                                                                                  | Default   |
-|----------------------------------|----------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.enable`         | Enables Peerix.                                                                              | `false`   |
-| `services.peerix.openFirewall`   | Open the necessary firewall ports.                                                           | `true`    |
-| `services.peerix.port`           | Port for the HTTP server and peer announcements.                                             | `12304`   |
-| `services.peerix.mode`           | Discovery mode: `"ipfs"`, `"libp2p"`, `"lan"`, `"wan"`, `"both"`, or `"hybrid"`.             | `"ipfs"`  |
-| `services.peerix.user`           | User to run the peerix service under.                                                        | `"nobody"`|
-| `services.peerix.group`          | Group to run the peerix service under.                                                       | `"nobody"`|
-| `services.peerix.privateKeyFile` | Path to the private key file for signing derivations.                                        | `null`    |
-| `services.peerix.publicKeyFile`  | Path to the public key file for verifying signatures.                                        | `null`    |
-| `services.peerix.publicKey`      | Public key string for verifying signatures.                                                  | `null`    |
-| `services.peerix.globalCacheTTL` | How long (seconds) nix should cache narinfo entries.                                         | `null`    |
-| `services.peerix.package`        | The peerix package to use. Use `pkgs.peerix` for a smaller version without libp2p.           | `pkgs.peerix-full` |
-
-### WAN Options
-
-| Option                               | Description                                                                              | Default   |
-|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.trackerUrl`          | URL of the peerix tracker server. Required for `wan` and `both` modes.                   | `null`    |
-| `services.peerix.announceAddr`        | Address to announce to the tracker. Overrides auto-detected IP (useful for NAT/VPN).     | `null`    |
-| `services.peerix.peerId`              | Unique peer ID. Auto-generated if not set.                                               | `null`    |
-| `services.peerix.upstreamCache`       | Upstream cache URL for hash verification.                                                | `"https://cache.nixos.org"` |
-| `services.peerix.noVerify`            | Disable hash verification against upstream cache.                                        | `false`   |
-| `services.peerix.noFilter`            | Disable heuristic filtering of system/sensitive derivations.                             | `false`   |
-| `services.peerix.noDefaultFilters`    | Keep filtering but skip built-in default patterns.                                       | `false`   |
-| `services.peerix.filterPatterns`      | Additional fnmatch patterns to exclude from WAN sharing.                                 | `[]`      |
-
-### LibP2P Options
-
-| Option                               | Description                                                                              | Default   |
-|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix.bootstrapUrl`        | URL to fetch bootstrap peer dynamically. Used when bootstrapPeers is empty.              | `"https://sophronesis.dev/peerix/bootstrap"` |
-| `services.peerix.bootstrapPeers`      | Static LibP2P bootstrap peer multiaddrs. If empty, fetched from bootstrapUrl.            | `[]`      |
-| `services.peerix.relayServers`        | LibP2P relay server multiaddrs for NAT traversal fallback.                               | `[]`      |
-| `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `"default"` |
-| `services.peerix.listenAddrs`         | LibP2P listen addresses. Note: py-libp2p 0.6.0 only supports TCP.                        | `["/ip4/0.0.0.0/tcp/{port+1000}"]` |
-
-### Tracker Service
-
-Run your own tracker for private networks or as a public bootstrap node:
-
-| Option                               | Description                                                                              | Default   |
-|---------------------------------------|------------------------------------------------------------------------------------------|-----------|
-| `services.peerix-tracker.enable`      | Enable the peerix tracker server.                                                        | `false`   |
-| `services.peerix-tracker.port`        | Port for the tracker HTTP server.                                                        | `12305`   |
-| `services.peerix-tracker.dbPath`      | Path to the tracker SQLite database.                                                     | `"/var/lib/peerix-tracker/tracker.db"` |
-| `services.peerix-tracker.openFirewall`| Open the firewall for the tracker port.                                                  | `true`    |
-| `services.peerix-tracker.package`     | The peerix package to use.                                                               | `pkgs.peerix-full` |
-
-WAN Mode
---------
-
-WAN mode enables peer-to-peer sharing across different networks using a lightweight tracker server for peer discovery.
-
-### Setup
-
-1. Run a tracker on an accessible host:
+Zero-config peer discovery on local networks (no internet required):
 
 ```nix
+services.peerix = {
+  enable = true;
+  mode = "lan";
+};
+```
+
+### Run Your Own Tracker
+
+```nix
+# On server
 services.peerix-tracker.enable = true;
+
+# On clients
+services.peerix.trackerUrl = "http://your-server:12305";
 ```
 
-2. Configure peers to use WAN mode:
+How It Works
+------------
 
-```nix
-services.peerix = {
-  enable = true;
-  mode = "wan";
-  trackerUrl = "http://tracker-host:12305";
-};
-```
+Peerix implements a Nix binary cache. When Nix queries peerix for a package:
 
-3. For peers behind NAT, use `announceAddr` to specify the reachable address:
+1. **IPFS mode**: Checks tracker for CID mapping, fetches NAR from IPFS
+2. **LAN mode**: Broadcasts UDP request, peers respond if they have the package
 
-```nix
-services.peerix = {
-  enable = true;
-  mode = "wan";
-  trackerUrl = "http://tracker-host:12305";
-  announceAddr = "my-public-ip-or-hostname";
-};
-```
+Store path hashes are verified against `cache.nixos.org` by default.
 
-### Security
+### IPFS Mode Details
 
-WAN mode includes several safety features:
+- Periodically scans local store and publishes NARs to IPFS
+- CID mappings registered with tracker for peer discovery
+- DHT announcement for content discoverability across NAT
+- Web dashboard at `http://localhost:12304/` shows scan progress
 
-- **Hash verification**: By default, store path hashes are verified against the upstream cache before sharing.
-- **Heuristic filtering**: System-specific and sensitive derivations (passwords, keys, network configs) are excluded from WAN sharing.
-- **Narinfo signing**: When `NIX_SECRET_KEY_FILE` or `privateKeyFile` is set, narinfo responses are signed with ed25519, allowing peers to verify authenticity with `require-sigs = true`.
-- **Reputation tracking**: The tracker records transfer history for peer reputation.
+Configuration
+-------------
 
-LibP2P Mode
------------
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enable` | `false` | Enable peerix |
+| `mode` | `"ipfs"` | Discovery mode: `"ipfs"` or `"lan"` |
+| `port` | `12304` | HTTP server port |
+| `trackerUrl` | `null` | Tracker URL (required for IPFS mode) |
+| `openFirewall` | `true` | Open firewall ports |
+| `privateKeyFile` | `null` | Path to signing key |
+| `publicKey` | `null` | Public key for signature verification |
 
-LibP2P mode enables true peer-to-peer networking with built-in NAT traversal using the libp2p stack. This includes DHT-based peer discovery, mDNS for local network discovery, and hole punching for connecting peers behind NAT.
+### Tracker Options
 
-### Setup
+| Option | Default | Description |
+|--------|---------|-------------|
+| `services.peerix-tracker.enable` | `false` | Enable tracker server |
+| `services.peerix-tracker.port` | `12305` | Tracker HTTP port |
 
-LibP2P mode works out of the box with default settings - peers connect via a public bootstrap server:
+Signing
+-------
 
-```nix
-services.peerix = {
-  enable = true;
-  mode = "libp2p";
-};
-```
-
-For private networks, set a custom `networkId` (all peers must match):
-
-```nix
-services.peerix = {
-  enable = true;
-  mode = "libp2p";
-  networkId = "my-private-network";
-  bootstrapPeers = [
-    "/ip4/your-server/tcp/13304/p2p/QmYourPeerID"
-  ];
-};
-```
-
-To find your peer's multiaddr, check the logs:
+Generate a key pair:
 
 ```bash
-journalctl -u peerix | grep "LibP2P listening"
-# Output: LibP2P listening on: ['/ip4/1.2.3.4/tcp/13304/p2p/16Uiu2HAm...']
+nix-store --generate-binary-cache-key myhost cache-priv-key.pem cache-pub-key.pem
 ```
 
-### NAT Traversal
-
-LibP2P handles NAT traversal automatically via:
-
-- **mDNS**: Discovers peers on the local network without configuration.
-- **DHT**: Kademlia distributed hash table for global peer discovery.
-- **Hole Punching**: Establishes direct connections between NAT'd peers.
-- **Relay**: Falls back to relay servers when direct connection fails.
-
-For peers behind restrictive NAT, you can configure relay servers:
-
-```nix
-services.peerix = {
-  enable = true;
-  mode = "libp2p";
-  networkId = "my-network";
-  bootstrapPeers = [ "/ip4/.../p2p/..." ];
-  relayServers = [ "/ip4/.../p2p/..." ];  # Optional relay fallback
-};
-```
-
-### Hybrid Mode
-
-Hybrid mode combines libp2p with the HTTP tracker for maximum compatibility:
-
-```nix
-services.peerix = {
-  enable = true;
-  mode = "hybrid";
-  networkId = "my-network";
-  bootstrapPeers = [ "/ip4/.../p2p/..." ];
-  trackerUrl = "http://tracker-host:12305";  # Also use HTTP tracker
-};
-```
-
-This allows peers using libp2p to connect with peers using the HTTP tracker.
-
-### Bootstrap API
-
-Peerix exposes a `/bootstrap` endpoint that returns the current peer's multiaddr:
-
-```bash
-curl https://your-bootstrap-server:12304/bootstrap
-# Returns: {"peer_id": "16Uiu2HAm...", "multiaddrs": ["/ip4/.../p2p/..."], "network_id": "default"}
-```
-
-This enables dynamic bootstrap peer discovery - clients fetch the current peer ID at startup instead of using hardcoded values that break when the server restarts.
-
-IPFS Mode
----------
-
-IPFS mode uses the local IPFS daemon for content-addressed NAR distribution. Instead of streaming NARs directly between peers, NARs are added to IPFS and addressed by CID (Content Identifier). This leverages IPFS's content-addressed storage and distribution network.
-
-### How It Works
-
-1. **Periodic Scanning**: Peerix periodically scans the local nix store (default: every hour), filters out sensitive packages, and publishes applicable NARs to IPFS
-2. **CID Registry**: NarHash → CID mappings are stored locally and registered with the tracker so other peers can discover available content
-3. **Fetching**: When querying narinfo, peerix checks the tracker for CID mappings and fetches from IPFS if available
-4. **Startup Sync**: On startup, all local CID mappings are pre-registered with the tracker
-
-### Setup
-
-IPFS mode requires a running IPFS daemon:
-
-```bash
-# Start IPFS daemon
-ipfs daemon &
-
-# Run peerix in IPFS mode
-nix run . -- --mode ipfs --tracker-url http://tracker:12305 --verbose
-```
-
-NixOS configuration:
-
-```nix
-services.peerix = {
-  enable = true;
-  mode = "ipfs";
-  trackerUrl = "http://tracker-host:12305";
-};
-
-# Ensure IPFS daemon is running
-services.kubo.enable = true;
-```
-
-### Benefits
-
-- **Content-addressed**: NARs are deduplicated across the IPFS network
-- **Resilience**: Content persists in IPFS even if the original peer goes offline
-- **Interoperability**: Potential future integration with nix IPFS support (nix#859)
-
-### Configuration
-
-| Option | CLI | Default | Description |
-|--------|-----|---------|-------------|
-| `scanInterval` | `--scan-interval` | `3600` | Seconds between store scans (0 to disable) |
-
-- Scans **all** store paths (no limit), filters sensitive packages, publishes to IPFS
-- CID mappings synced to tracker after each scan
-- CID cache stored at `/var/lib/peerix/cid_cache.json`
-- IPFS API defaults to `http://127.0.0.1:5001/api/v0`
-- NAR URLs use `ipfs/{cid}` format when fetched via IPFS
-- Filtering uses same patterns as WAN mode (system configs, secrets, etc.)
-
-Network Protocol
-----------------
-
-- **LAN**: UDP port 12304 (configurable) for broadcast-based peer discovery. Packet byte 0 is message type (0=request, 1=response), bytes 1-4 are request ID.
-- **WAN**: Peers announce to the tracker via HTTP. The tracker maintains a peer registry and transfer history in SQLite.
-- **LibP2P**: TCP port 13304 (HTTP port + 1000) for libp2p connections. Uses custom protocols `/peerix/narinfo/1.0.0` and `/peerix/nar/1.0.0` for narinfo queries and NAR transfers. DHT keys use `/peerix/v1/network/{network_id_hash}` namespace.
-- **IPFS**: Uses local IPFS daemon API (port 5001) to add/fetch NARs. CID mappings are tracked via tracker's `/cid` endpoints. NAR URLs use `ipfs/{cid}` format.
-- **HTTP**: Port 12304 (configurable) serves both local narinfo/NAR to peers and proxied remote content to the local nix daemon.
+Set `privateKeyFile` on serving nodes and `publicKey` on consuming nodes.
 
 Dependencies
 ------------
 
-- Python 3.12+: `aiohttp`, `uvloop`, `hypercorn`, `starlette`, `psutil`, `httpx`, `pynacl` (optional, for narinfo signing)
-- LibP2P mode: `libp2p`, `trio`, `trio-typing` (included in `peerix-full` package)
-- IPFS mode: `httpx`, `trio`, local IPFS daemon (kubo)
+- Python 3.12+: `trio`, `hypercorn`, `starlette`, `httpx`, `pynacl`
+- IPFS mode: local IPFS daemon (kubo)
 - System: `nix`, `nix-serve`
