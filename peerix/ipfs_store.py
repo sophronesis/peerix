@@ -92,6 +92,7 @@ class IPFSStore(Store):
         self.local_store = local_store
         self.api_url = api_url.rstrip("/")
         self.cache_path = cache_path  # Gzip-compressed JSON
+        self.skipped_cache_path = cache_path.replace("cid_cache", "skipped_cache")
         self.publish_local = publish_local
         self.fetch_timeout = fetch_timeout
         self.tracker_client = tracker_client
@@ -99,8 +100,11 @@ class IPFSStore(Store):
 
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID (in-memory)
+        self._skipped_cache: t.Set[str] = set()  # Hashes that were skipped
         self._cache_dirty: bool = False  # Track if cache needs saving
+        self._skipped_dirty: bool = False
         self._load_cache()
+        self._load_skipped_cache()
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
@@ -294,6 +298,27 @@ class IPFSStore(Store):
     def _mark_dirty(self) -> None:
         """Mark cache as needing save."""
         self._cache_dirty = True
+
+    def _load_skipped_cache(self) -> None:
+        """Load skipped hashes from gzip-compressed JSON file."""
+        try:
+            if os.path.exists(self.skipped_cache_path):
+                with gzip.open(self.skipped_cache_path, "rt", encoding="utf-8") as f:
+                    self._skipped_cache = set(json.load(f))
+                logger.info(f"Loaded {len(self._skipped_cache)} skipped hashes from cache")
+        except Exception as e:
+            logger.warning(f"Failed to load skipped cache: {e}")
+            self._skipped_cache = set()
+
+    def _save_skipped_cache(self) -> None:
+        """Save skipped hashes to gzip-compressed JSON file."""
+        try:
+            os.makedirs(os.path.dirname(self.skipped_cache_path), exist_ok=True)
+            with gzip.open(self.skipped_cache_path, "wt", encoding="utf-8") as f:
+                json.dump(list(self._skipped_cache), f)
+            self._skipped_dirty = False
+        except Exception as e:
+            logger.warning(f"Failed to save skipped cache: {e}")
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with connection pooling."""
@@ -688,9 +713,10 @@ class IPFSStore(Store):
         store_hashes = scan_store_paths(limit=0)  # 0 = no limit
         logger.info(f"Found {len(store_hashes)} store paths to process")
 
-        # Count how many are already cached (instant hits)
+        # Count how many are already cached or skipped (instant hits)
         already_in_cache = sum(1 for h in store_hashes if h in self._cid_cache)
-        total_work_estimate = len(store_hashes) - already_in_cache
+        already_skipped = sum(1 for h in store_hashes if h in self._skipped_cache)
+        total_work_estimate = len(store_hashes) - already_in_cache - already_skipped
 
         # Initialize progress tracking
         self._scan_progress = {
@@ -721,6 +747,13 @@ class IPFSStore(Store):
                 self._scan_progress["processed"] += 1
                 return
 
+            # Skip if previously skipped (persisted)
+            if hsh in self._skipped_cache:
+                counters["already_cached"] += 1  # Count as cached for progress
+                self._scan_progress["already_cached"] = counters["already_cached"]
+                self._scan_progress["processed"] += 1
+                return
+
             async with semaphore:
                 # Update current processing info
                 self._scan_progress["current_hash"] = hsh
@@ -735,6 +768,8 @@ class IPFSStore(Store):
                 try:
                     ni = await self.local_store.narinfo(hsh)
                     if ni is None:
+                        self._skipped_cache.add(hsh)
+                        self._skipped_dirty = True
                         counters["skipped"] += 1
                         self._scan_progress["skipped"] = counters["skipped"]
                         self._scan_progress["processed"] += 1
@@ -746,6 +781,8 @@ class IPFSStore(Store):
                     # Check exclusion patterns
                     if self._is_excluded(ni.storePath, extra_patterns):
                         logger.debug(f"Excluded: {ni.storePath}")
+                        self._skipped_cache.add(hsh)
+                        self._skipped_dirty = True
                         counters["skipped"] += 1
                         self._scan_progress["skipped"] = counters["skipped"]
                         self._scan_progress["processed"] += 1
@@ -776,6 +813,8 @@ class IPFSStore(Store):
                             except Exception as e:
                                 logger.debug(f"Failed to register CID: {e}")
                     else:
+                        self._skipped_cache.add(hsh)
+                        self._skipped_dirty = True
                         counters["skipped"] += 1
                         self._scan_progress["skipped"] = counters["skipped"]
 
@@ -783,6 +822,8 @@ class IPFSStore(Store):
 
                 except Exception as e:
                     logger.debug(f"Failed to process {hsh}: {e}")
+                    self._skipped_cache.add(hsh)
+                    self._skipped_dirty = True
                     counters["skipped"] += 1
                     self._scan_progress["skipped"] = counters["skipped"]
                     self._scan_progress["processed"] += 1
@@ -792,9 +833,11 @@ class IPFSStore(Store):
             for hsh in store_hashes:
                 nursery.start_soon(publish_one, hsh)
 
-        # Save cache if dirty (gzip compression makes batch saves more efficient)
+        # Save caches if dirty
         if self._cache_dirty:
             self._save_cache()
+        if self._skipped_dirty:
+            self._save_skipped_cache()
 
         # Mark scan as complete
         self._scan_progress["active"] = False
