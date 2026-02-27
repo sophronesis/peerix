@@ -847,9 +847,15 @@ class IPFSStore(Store):
                     self._scan_progress["processed"] += 1
 
         # Periodic cache saver (every 60s during scan)
+        scan_done_event = trio.Event()
+
         async def periodic_save() -> None:
-            while self._scan_progress["active"]:
-                await trio.sleep(60)
+            while True:
+                # Wait up to 60s or until scan completes
+                with trio.move_on_after(60):
+                    await scan_done_event.wait()
+                    return  # Scan finished, exit
+                # Timeout - do periodic save
                 if self._cache_dirty:
                     self._save_cache()
                     logger.debug("Periodic save: CID cache")
@@ -857,11 +863,16 @@ class IPFSStore(Store):
                     self._save_skipped_cache()
                     logger.debug("Periodic save: skipped cache")
 
-        # Process all hashes in parallel with limited concurrency
+        async def run_scan_work() -> None:
+            async with trio.open_nursery() as work_nursery:
+                for hsh in store_hashes:
+                    work_nursery.start_soon(publish_one, hsh)
+
+        # Run work and periodic save in parallel
         async with trio.open_nursery() as nursery:
             nursery.start_soon(periodic_save)
-            for hsh in store_hashes:
-                nursery.start_soon(publish_one, hsh)
+            await run_scan_work()
+            scan_done_event.set()  # Signal periodic_save to exit
 
         # Final save of caches
         if self._cache_dirty:
