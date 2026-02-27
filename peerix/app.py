@@ -501,12 +501,22 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
     <h1>Peerix Dashboard</h1>
     <div id="error" class="error-msg" style="display: none; margin-bottom: 20px;"></div>
     <div class="grid">
-        <div class="card">
+        <div class="card" id="scan-card" style="display: none;">
             <h2>Scan Progress</h2>
             <div class="value" id="percent">--</div>
             <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
             <div class="eta" id="eta"></div>
             <div class="current-path" id="current-path"></div>
+        </div>
+        <div class="card" id="announce-card" style="display: none;">
+            <h2>DHT Announcement</h2>
+            <div class="value" id="announce-percent">--</div>
+            <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>
+            <div class="eta" id="announce-eta"></div>
+            <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                <span id="announce-announced">0</span> announced,
+                <span id="announce-pending">0</span> pending
+            </div>
         </div>
         <div class="card">
             <h2>Published to IPFS</h2>
@@ -523,16 +533,6 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         <div class="card">
             <h2>Skipped</h2>
             <div class="value warning" id="skipped">--</div>
-        </div>
-        <div class="card">
-            <h2>DHT Announcement</h2>
-            <div class="value" id="announce-percent">--</div>
-            <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>
-            <div class="eta" id="announce-eta"></div>
-            <div style="font-size: 12px; color: #666; margin-top: 4px;">
-                <span id="announce-announced">0</span> announced,
-                <span id="announce-pending">0</span> pending
-            </div>
         </div>
         <div class="card">
             <h2>CID Cache Size</h2>
@@ -576,6 +576,14 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 const announce = await announceResp.json();
 
                 document.getElementById('error').style.display = 'none';
+
+                // Show/hide scan card (visible when active)
+                const scanCard = document.getElementById('scan-card');
+                scanCard.style.display = scan.active ? 'block' : 'none';
+
+                // Show/hide announce card (visible when active or has pending)
+                const announceCard = document.getElementById('announce-card');
+                announceCard.style.display = (announce.active || announce.pending > 0) ? 'block' : 'none';
 
                 // Scan progress
                 const percent = scan.percent || 0;
