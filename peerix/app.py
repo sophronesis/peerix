@@ -279,6 +279,61 @@ async def scan_status(req: Request) -> Response:
     return JSONResponse(progress)
 
 
+@app.route("/publish/{hash:str}", methods=["POST"])
+async def publish_to_ipfs(req: Request) -> Response:
+    """
+    Manually publish a single store path to IPFS.
+
+    Localhost only. Returns the CID if successful.
+    """
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+
+    hsh = req.path_params["hash"]
+    store = ipfs_access["store"]
+
+    # Check if already in cache
+    if hsh in store._cid_cache:
+        return JSONResponse({
+            "status": "already_cached",
+            "hash": hsh,
+            "cid": store._cid_cache[hsh],
+        })
+
+    # Publish to IPFS
+    try:
+        cid = await store.publish_nar(hsh)
+        if cid:
+            # Register with tracker if available
+            tracker_client = ipfs_access.get("tracker_client")
+            if tracker_client is not None:
+                try:
+                    await tracker_client.register_cid(hsh, cid)
+                except Exception as e:
+                    logger.warning(f"Failed to register CID with tracker: {e}")
+
+            return JSONResponse({
+                "status": "published",
+                "hash": hsh,
+                "cid": cid,
+            })
+        else:
+            return JSONResponse({
+                "status": "failed",
+                "hash": hsh,
+                "error": "publish_nar returned None",
+            }, status_code=500)
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "hash": hsh,
+            "error": str(e),
+        }, status_code=500)
+
+
 DASHBOARD_HTML = '''<!DOCTYPE html>
 <html>
 <head>
