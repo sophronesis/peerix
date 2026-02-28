@@ -605,6 +605,18 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Skipped</span>
                 <span class="status-value" id="skipped">--</span>
             </div>
+            <div class="status-row" style="margin-top: 12px; border-top: 1px solid #333; padding-top: 12px;">
+                <span class="status-label">IPFS Peers</span>
+                <span class="status-value" id="ipfs-peers">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">IPFS In</span>
+                <span class="status-value" id="ipfs-rate-in">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">IPFS Out</span>
+                <span class="status-value" id="ipfs-rate-out">--</span>
+            </div>
         </div>
         <div class="card" id="tracker-card" style="display: none;">
             <h2>Tracker Peers</h2>
@@ -750,6 +762,18 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     announceActiveEl.style.color = '#888';
                 }
 
+                // IPFS Peers and Bandwidth
+                document.getElementById('ipfs-peers').textContent = stats.ipfs_peers ?? '--';
+                if (stats.ipfs_bandwidth) {
+                    const formatRate = (rate) => {
+                        if (rate > 1024 * 1024) return (rate / 1024 / 1024).toFixed(1) + ' MB/s';
+                        if (rate > 1024) return (rate / 1024).toFixed(1) + ' KB/s';
+                        return rate.toFixed(0) + ' B/s';
+                    };
+                    document.getElementById('ipfs-rate-in').textContent = formatRate(stats.ipfs_bandwidth.rate_in);
+                    document.getElementById('ipfs-rate-out').textContent = formatRate(stats.ipfs_bandwidth.rate_out);
+                }
+
                 // Tracker URL
                 const trackerEl = document.getElementById('tracker-url');
                 const trackerCard = document.getElementById('tracker-card');
@@ -842,11 +866,28 @@ async def dashboard_stats(req: Request) -> Response:
         if tracker_client is not None:
             stats["tracker_url"] = tracker_client.tracker_url
 
-        # Check IPFS daemon connectivity
+        # Check IPFS daemon connectivity and get stats
         try:
             client = await store._get_client()
             resp = await client.post(f"{store.api_url}/id", timeout=5.0)
             stats["ipfs_available"] = resp.status_code == 200
+
+            # Get bandwidth stats
+            bw_resp = await client.post(f"{store.api_url}/stats/bw", timeout=5.0)
+            if bw_resp.status_code == 200:
+                bw = bw_resp.json()
+                stats["ipfs_bandwidth"] = {
+                    "total_in": bw.get("TotalIn", 0),
+                    "total_out": bw.get("TotalOut", 0),
+                    "rate_in": bw.get("RateIn", 0),
+                    "rate_out": bw.get("RateOut", 0),
+                }
+
+            # Get peer count
+            peers_resp = await client.post(f"{store.api_url}/swarm/peers", timeout=5.0)
+            if peers_resp.status_code == 200:
+                peers = peers_resp.json()
+                stats["ipfs_peers"] = len(peers.get("Peers") or [])
         except Exception:
             stats["ipfs_available"] = False
 
