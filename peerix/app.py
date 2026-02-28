@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 from peerix.local import local
 from peerix.remote import remote
 from peerix.prefix import PrefixStore
-from peerix.filtered import FilteredStore
+from peerix.filtered import FilteredStore, NixpkgsFilteredStore
 from peerix.verified import VerifiedStore
 from peerix.tracker_client import TrackerClient
 from peerix.store_scanner import scan_store_paths
@@ -35,6 +35,7 @@ async def setup_stores(
     no_verify: bool = False,
     upstream_cache: str = "https://cache.nixos.org",
     no_filter: bool = False,
+    filter_mode: str = "nixpkgs",  # "nixpkgs" or "rules"
     filter_patterns: list = None,
     no_default_filters: bool = False,
     peer_id: str = None,
@@ -62,7 +63,7 @@ async def setup_stores(
             r_access = None
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
-                no_filter, filter_patterns, no_default_filters, peer_id,
+                no_filter, filter_mode, filter_patterns, no_default_filters, peer_id,
                 scan_interval, ipfs_concurrency,
             )
             ipfs_access = ipfs_info
@@ -84,6 +85,13 @@ async def setup_stores(
                             filter_patterns,
                             ipfs_concurrency,
                         )
+                    # Start periodic DHT re-announcement (starts PAUSED by default)
+                    nursery.start_soon(
+                        ipfs_info["store"].run_periodic_reannounce,
+                        1,    # concurrency (1 at a time)
+                        1,    # batch_size (1 CID at a time)
+                        10.0, # batch_delay (10s between announcements)
+                    )
                     yield
                     nursery.cancel_scope.cancel()
             finally:
@@ -123,7 +131,7 @@ async def _run_periodic_delta_sync(tracker_client: TrackerClient, interval: floa
 
 
 async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
-                      no_filter, filter_patterns, no_default_filters, peer_id,
+                      no_filter, filter_mode, filter_patterns, no_default_filters, peer_id,
                       scan_interval=3600, ipfs_concurrency=10):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
@@ -134,15 +142,22 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
     # Build the serving chain: local → verified → filtered
     serving_store = local_store
     verified_store = None
+    nixpkgs_filter = None
     if not no_verify:
         verified_store = VerifiedStore(serving_store, upstream_cache)
         serving_store = verified_store
     if not no_filter:
-        serving_store = FilteredStore(
-            serving_store,
-            extra_patterns=filter_patterns or [],
-            use_defaults=not no_default_filters,
-        )
+        if filter_mode == "nixpkgs":
+            nixpkgs_filter = NixpkgsFilteredStore(serving_store, cache_url=upstream_cache)
+            serving_store = nixpkgs_filter
+            logger.info("Using nixpkgs filter (only serving packages in cache.nixos.org)")
+        else:  # "rules"
+            serving_store = FilteredStore(
+                serving_store,
+                extra_patterns=filter_patterns or [],
+                use_defaults=not no_default_filters,
+            )
+            logger.info("Using rules-based filter")
 
     # Create tracker client for package lookups
     tracker_client = None
@@ -165,6 +180,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
         "access": ipfs_prefix,
         "store": ipfs_store,
         "verified_store": verified_store,
+        "nixpkgs_filter": nixpkgs_filter,
         "serving_store": serving_store,
         "tracker_client": tracker_client,
         "concurrency": ipfs_concurrency,
@@ -183,6 +199,10 @@ async def _cleanup_ipfs(ipfs_info):
     vs = ipfs_info.get("verified_store")
     if vs is not None:
         await vs.close()
+
+    nf = ipfs_info.get("nixpkgs_filter")
+    if nf is not None:
+        await nf.close()
 
     tracker_client = ipfs_info.get("tracker_client")
     if tracker_client is not None:
@@ -287,6 +307,50 @@ async def announce_status(req: Request) -> Response:
 
     progress = ipfs_access["store"].get_announce_progress()
     return JSONResponse(progress)
+
+
+@app.route("/scan/pause", methods=["POST"])
+async def pause_scan(req: Request) -> Response:
+    """Pause the scan process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].pause_scan()
+    return JSONResponse({"status": "paused"})
+
+
+@app.route("/scan/resume", methods=["POST"])
+async def resume_scan(req: Request) -> Response:
+    """Resume the scan process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].resume_scan()
+    return JSONResponse({"status": "resumed"})
+
+
+@app.route("/reannounce/pause", methods=["POST"])
+async def pause_reannounce(req: Request) -> Response:
+    """Pause the DHT re-announcement process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].pause_reannounce()
+    return JSONResponse({"status": "paused"})
+
+
+@app.route("/reannounce/resume", methods=["POST"])
+async def resume_reannounce(req: Request) -> Response:
+    """Resume the DHT re-announcement process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].resume_reannounce()
+    return JSONResponse({"status": "resumed"})
 
 
 @app.route("/announce", methods=["POST"])
@@ -488,6 +552,21 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             color: #00d9ff;
             margin-top: 8px;
         }
+        .ctrl-btn {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 8px;
+        }
+        .ctrl-btn:hover { background: #2a2a3e; }
+        .ctrl-btn.danger { border-color: #ff4444; color: #ff4444; }
+        .ctrl-btn.danger:hover { background: #ff444422; }
+        .ctrl-btn.paused { color: #ff9500; border-color: #ff9500; }
+        .ctrl-btn.running { color: #00ff88; border-color: #00ff88; }
         .error-msg {
             background: #ff444433;
             border: 1px solid #ff4444;
@@ -526,8 +605,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         <div class="card">
             <h2>Progress</h2>
             <div style="margin-bottom: 16px;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                    <span style="color: #888;">Scan</span>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="color: #888;"><button class="ctrl-btn" id="scan-toggle" onclick="toggleScan()" title="Pause/Resume">▶</button> Scan</span>
                     <span id="percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
@@ -535,8 +614,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <div class="current-path" id="current-path"></div>
             </div>
             <div>
-                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                    <span style="color: #888;">DHT Announce</span>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="color: #888;"><button class="ctrl-btn" id="dht-toggle" onclick="toggleDHT()" title="Pause/Resume">▶</button> DHT Announce</span>
                     <span id="announce-percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>
@@ -545,6 +624,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     <span id="announce-announced">0</span> announced,
                     <span id="announce-pending">0</span> pending
                 </div>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Controls</h2>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="ctrl-btn danger" onclick="stopIPFS()" title="Stop IPFS daemon">Stop IPFS</button>
             </div>
         </div>
         <div class="card">
@@ -592,6 +677,18 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Skipped</span>
                 <span class="status-value" id="skipped">--</span>
             </div>
+            <div class="status-row" style="margin-top: 12px; border-top: 1px solid #333; padding-top: 12px;">
+                <span class="status-label">IPFS Peers</span>
+                <span class="status-value" id="ipfs-peers">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">IPFS In</span>
+                <span class="status-value" id="ipfs-rate-in">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">IPFS Out</span>
+                <span class="status-value" id="ipfs-rate-out">--</span>
+            </div>
         </div>
         <div class="card" id="tracker-card" style="display: none;">
             <h2>Tracker Peers</h2>
@@ -607,6 +704,29 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 </tbody>
             </table>
         </div>
+        <div class="card" id="ipfs-peers-card" style="display: none;">
+            <h2>IPFS Swarm Peers</h2>
+            <div class="status-row" style="margin-bottom: 8px;">
+                <span class="status-label">Inbound</span>
+                <span class="status-value" id="ipfs-inbound-count" style="color: #00ff88;">--</span>
+            </div>
+            <div class="status-row" style="margin-bottom: 12px;">
+                <span class="status-label">Outbound</span>
+                <span class="status-value" id="ipfs-outbound-count" style="color: #00d9ff;">--</span>
+            </div>
+            <table class="peers-table" style="font-size: 11px;">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>IP</th>
+                        <th>In</th>
+                        <th>Out</th>
+                    </tr>
+                </thead>
+                <tbody id="ipfs-peers-body">
+                </tbody>
+            </table>
+        </div>
     </div>
     <script>
         // Country code to flag emoji
@@ -614,6 +734,31 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             if (!code || code.length !== 2) return '';
             const offset = 127397;
             return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset));
+        }
+
+        let lastVersion = null;
+        let scanPaused = false;
+        let dhtPaused = false;
+
+        async function toggleScan() {
+            const endpoint = scanPaused ? '/scan/resume' : '/scan/pause';
+            await fetch(endpoint, { method: 'POST' });
+        }
+
+        async function toggleDHT() {
+            const endpoint = dhtPaused ? '/reannounce/resume' : '/reannounce/pause';
+            await fetch(endpoint, { method: 'POST' });
+        }
+
+        async function stopIPFS() {
+            if (confirm('Stop IPFS daemon? This will disable all IPFS functionality.')) {
+                try {
+                    await fetch('http://127.0.0.1:5001/api/v0/shutdown', { method: 'POST' });
+                    alert('IPFS shutdown requested');
+                } catch (e) {
+                    alert('Failed to stop IPFS: ' + e.message);
+                }
+            }
         }
 
         async function update() {
@@ -632,10 +777,19 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 const stats = await statsResp.json();
                 const announce = await announceResp.json();
 
+                // Auto-reload on version change
+                if (stats.dashboard_version) {
+                    if (lastVersion && lastVersion !== stats.dashboard_version) {
+                        location.reload();
+                        return;
+                    }
+                    lastVersion = stats.dashboard_version;
+                }
+
                 document.getElementById('error').style.display = 'none';
 
-                // Scan progress
-                const percent = scan.percent || 0;
+                // Scan progress (cap at 100%)
+                const percent = Math.min(100, scan.percent || 0);
                 document.getElementById('percent').textContent = percent.toFixed(1) + '%';
                 document.getElementById('bar').style.width = percent + '%';
 
@@ -645,17 +799,17 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('cached').textContent = scan.already_cached || 0;
                 document.getElementById('skipped').textContent = scan.skipped || 0;
 
-                // Announcement progress
-                const announcePercent = announce.percent || 0;
+                // Announcement progress (cap at 100%)
+                const announcePercent = Math.min(100, announce.percent || 0);
                 document.getElementById('announce-percent').textContent = announcePercent.toFixed(1) + '%';
                 document.getElementById('announce-bar').style.width = announcePercent + '%';
-                document.getElementById('announce-announced').textContent = announce.announced || 0;
+                document.getElementById('announce-announced').textContent = announce.fresh_announced || 0;
                 document.getElementById('announce-pending').textContent = announce.pending || 0;
 
                 // Announcement ETA
                 const announceEtaEl = document.getElementById('announce-eta');
-                if (announce.active && announce.eta_seconds) {
-                    const eta = announce.eta_seconds;
+                const eta = announce.active ? announce.eta_seconds : announce.reannounce_eta_seconds;
+                if (eta) {
                     let etaText;
                     if (eta < 60) {
                         etaText = Math.round(eta) + 's remaining';
@@ -663,12 +817,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                         const mins = Math.floor(eta / 60);
                         const secs = Math.round(eta % 60);
                         etaText = mins + 'm ' + secs + 's remaining';
-                    } else {
+                    } else if (eta < 86400) {
                         const hours = Math.floor(eta / 3600);
                         const mins = Math.floor((eta % 3600) / 60);
                         etaText = hours + 'h ' + mins + 'm remaining';
+                    } else {
+                        const days = Math.floor(eta / 86400);
+                        const hours = Math.floor((eta % 86400) / 3600);
+                        etaText = days + 'd ' + hours + 'h remaining';
                     }
-                    announceEtaEl.textContent = etaText;
+                    announceEtaEl.textContent = announce.paused ? '' : etaText;
                 } else {
                     announceEtaEl.textContent = announce.active ? 'Starting...' : '';
                 }
@@ -737,6 +895,45 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     announceActiveEl.style.color = '#888';
                 }
 
+                // Update pause states and buttons
+                scanPaused = scan.paused || false;
+                dhtPaused = announce.paused || false;
+
+                const scanToggle = document.getElementById('scan-toggle');
+                const dhtToggle = document.getElementById('dht-toggle');
+
+                if (scanPaused) {
+                    scanToggle.textContent = '▶';
+                    scanToggle.className = 'ctrl-btn paused';
+                    scanToggle.title = 'Resume scan';
+                } else {
+                    scanToggle.textContent = '⏸';
+                    scanToggle.className = 'ctrl-btn running';
+                    scanToggle.title = 'Pause scan';
+                }
+
+                if (dhtPaused) {
+                    dhtToggle.textContent = '▶';
+                    dhtToggle.className = 'ctrl-btn paused';
+                    dhtToggle.title = 'Resume DHT announce';
+                } else {
+                    dhtToggle.textContent = '⏸';
+                    dhtToggle.className = 'ctrl-btn running';
+                    dhtToggle.title = 'Pause DHT announce';
+                }
+
+                // IPFS Peers and Bandwidth
+                document.getElementById('ipfs-peers').textContent = stats.ipfs_peers ?? '--';
+                if (stats.ipfs_bandwidth) {
+                    const formatRate = (rate) => {
+                        if (rate > 1024 * 1024) return (rate / 1024 / 1024).toFixed(1) + ' MB/s';
+                        if (rate > 1024) return (rate / 1024).toFixed(1) + ' KB/s';
+                        return rate.toFixed(0) + ' B/s';
+                    };
+                    document.getElementById('ipfs-rate-in').textContent = formatRate(stats.ipfs_bandwidth.rate_in);
+                    document.getElementById('ipfs-rate-out').textContent = formatRate(stats.ipfs_bandwidth.rate_out);
+                }
+
                 // Tracker URL
                 const trackerEl = document.getElementById('tracker-url');
                 const trackerCard = document.getElementById('tracker-card');
@@ -787,6 +984,89 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     trackerCard.style.display = 'none';
                 }
 
+                // Fetch IPFS swarm peers
+                const ipfsPeersCard = document.getElementById('ipfs-peers-card');
+                try {
+                    const ipfsPeersResp = await fetch('/ipfs-peers');
+                    if (ipfsPeersResp.ok) {
+                        const ipfsPeersData = await ipfsPeersResp.json();
+                        const ipfsPeers = ipfsPeersData.peers || [];
+
+                        if (ipfsPeers.length > 0) {
+                            ipfsPeersCard.style.display = 'block';
+
+                            // Update counts
+                            document.getElementById('ipfs-inbound-count').textContent = ipfsPeersData.inbound || 0;
+                            document.getElementById('ipfs-outbound-count').textContent = ipfsPeersData.outbound || 0;
+
+                            const ipfsTbody = document.getElementById('ipfs-peers-body');
+                            ipfsTbody.innerHTML = '';
+
+                            // Format bytes
+                            const formatBytes = (bytes) => {
+                                if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(1) + 'G';
+                                if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + 'M';
+                                if (bytes >= 1024) return (bytes / 1024).toFixed(1) + 'K';
+                                return bytes + 'B';
+                            };
+
+                            // Truncate IP to max 15 chars
+                            const truncateIp = (ip) => {
+                                if (!ip || ip.length <= 15) return ip;
+                                return ip.substring(0, 12) + '...';
+                            };
+
+                            // Show first 15 peers
+                            for (const peer of ipfsPeers.slice(0, 15)) {
+                                const tr = document.createElement('tr');
+
+                                // Flag cell
+                                const flagTd = document.createElement('td');
+                                flagTd.textContent = countryToFlag(peer.country || '');
+                                tr.appendChild(flagTd);
+
+                                // IP cell (truncated)
+                                const ipTd = document.createElement('td');
+                                ipTd.textContent = truncateIp(peer.ip);
+                                if (peer.ip && peer.ip.length > 15) {
+                                    ipTd.title = peer.ip;
+                                }
+                                tr.appendChild(ipTd);
+
+                                // In bandwidth cell
+                                const inTd = document.createElement('td');
+                                inTd.textContent = formatBytes(peer.total_in || 0);
+                                inTd.style.color = '#00ff88';
+                                tr.appendChild(inTd);
+
+                                // Out bandwidth cell
+                                const outTd = document.createElement('td');
+                                outTd.textContent = formatBytes(peer.total_out || 0);
+                                outTd.style.color = '#00d9ff';
+                                tr.appendChild(outTd);
+
+                                ipfsTbody.appendChild(tr);
+                            }
+
+                            // Show "more" indicator if truncated
+                            if (ipfsPeers.length > 15) {
+                                const tr = document.createElement('tr');
+                                const td = document.createElement('td');
+                                td.colSpan = 4;
+                                td.textContent = '... and ' + (ipfsPeers.length - 15) + ' more';
+                                td.style.color = '#666';
+                                td.style.textAlign = 'center';
+                                tr.appendChild(td);
+                                ipfsTbody.appendChild(tr);
+                            }
+                        } else {
+                            ipfsPeersCard.style.display = 'none';
+                        }
+                    }
+                } catch (e) {
+                    ipfsPeersCard.style.display = 'none';
+                }
+
             } catch (e) {
                 document.getElementById('error').textContent = 'Error: ' + e.message;
                 document.getElementById('error').style.display = 'block';
@@ -809,8 +1089,10 @@ async def dashboard(req: Request) -> Response:
 @app.route("/dashboard-stats")
 async def dashboard_stats(req: Request) -> Response:
     """Get dashboard statistics as JSON."""
+    import hashlib
     stats = {
         "mode": "ipfs" if ipfs_access else "lan",
+        "dashboard_version": hashlib.md5(DASHBOARD_HTML.encode()).hexdigest()[:8],
         "cid_cache_size": 0,
         "skipped_cache_size": 0,
         "total_dht_announced": 0,
@@ -829,11 +1111,28 @@ async def dashboard_stats(req: Request) -> Response:
         if tracker_client is not None:
             stats["tracker_url"] = tracker_client.tracker_url
 
-        # Check IPFS daemon connectivity
+        # Check IPFS daemon connectivity and get stats
         try:
             client = await store._get_client()
             resp = await client.post(f"{store.api_url}/id", timeout=5.0)
             stats["ipfs_available"] = resp.status_code == 200
+
+            # Get bandwidth stats
+            bw_resp = await client.post(f"{store.api_url}/stats/bw", timeout=5.0)
+            if bw_resp.status_code == 200:
+                bw = bw_resp.json()
+                stats["ipfs_bandwidth"] = {
+                    "total_in": bw.get("TotalIn", 0),
+                    "total_out": bw.get("TotalOut", 0),
+                    "rate_in": bw.get("RateIn", 0),
+                    "rate_out": bw.get("RateOut", 0),
+                }
+
+            # Get peer count
+            peers_resp = await client.post(f"{store.api_url}/swarm/peers", timeout=5.0)
+            if peers_resp.status_code == 200:
+                peers = peers_resp.json()
+                stats["ipfs_peers"] = len(peers.get("Peers") or [])
         except Exception:
             stats["ipfs_available"] = False
 
@@ -891,6 +1190,154 @@ async def tracker_peers(req: Request) -> Response:
         pass
 
     return JSONResponse({"peers": []})
+
+
+@app.route("/ipfs-peers")
+async def ipfs_peers(req: Request) -> Response:
+    """Get IPFS swarm peers with direction, latency, and bandwidth."""
+    if ipfs_access is None:
+        return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
+
+    store = ipfs_access.get("store")
+    if store is None:
+        return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
+
+    try:
+        client = await store._get_client()
+        resp = await client.post(
+            f"{store.api_url}/swarm/peers?direction=true&latency=true",
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw_peers = data.get("Peers") or []
+
+            # Parse and format peers
+            peers = []
+            inbound_count = 0
+            outbound_count = 0
+
+            # Get unique IPs that need lookup
+            ips_to_lookup = []
+            for p in raw_peers:
+                addr = p.get("Addr", "")
+                # Extract IP from multiaddr like /ip4/1.2.3.4/tcp/4001
+                parts = addr.split("/")
+                ip = ""
+                for i, part in enumerate(parts):
+                    if part in ("ip4", "ip6") and i + 1 < len(parts):
+                        ip = parts[i + 1]
+                        break
+
+                if ip and ip not in _ip_country_cache:
+                    ips_to_lookup.append(ip)
+
+            # Batch lookup country codes
+            if ips_to_lookup:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=5.0) as geo_client:
+                        geo_resp = await geo_client.post(
+                            "http://ip-api.com/batch?fields=query,countryCode",
+                            json=[{"query": ip} for ip in ips_to_lookup[:100]],
+                            timeout=5.0,
+                        )
+                        if geo_resp.status_code == 200:
+                            for item in geo_resp.json():
+                                _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
+                except Exception:
+                    pass
+
+            # Fetch per-peer bandwidth stats in parallel (limit to 20 peers)
+            peer_bw = {}
+            peer_ids_to_query = [p.get("Peer", "") for p in raw_peers[:20] if p.get("Peer")]
+
+            async def fetch_peer_bw(peer_id: str) -> None:
+                try:
+                    bw_resp = await client.post(
+                        f"{store.api_url}/stats/bw?peer={peer_id}",
+                        timeout=2.0,
+                    )
+                    if bw_resp.status_code == 200:
+                        bw_data = bw_resp.json()
+                        peer_bw[peer_id] = {
+                            "total_in": bw_data.get("TotalIn", 0),
+                            "total_out": bw_data.get("TotalOut", 0),
+                            "rate_in": bw_data.get("RateIn", 0),
+                            "rate_out": bw_data.get("RateOut", 0),
+                        }
+                except Exception:
+                    pass
+
+            # Run bandwidth queries in parallel
+            import trio
+            async with trio.open_nursery() as nursery:
+                for peer_id in peer_ids_to_query:
+                    nursery.start_soon(fetch_peer_bw, peer_id)
+
+            for p in raw_peers:
+                addr = p.get("Addr", "")
+                peer_id = p.get("Peer", "")
+                latency = p.get("Latency", "n/a")
+                direction = p.get("Direction", 0)  # 1=inbound, 2=outbound
+
+                # Extract IP from multiaddr
+                parts = addr.split("/")
+                ip = ""
+                for i, part in enumerate(parts):
+                    if part in ("ip4", "ip6") and i + 1 < len(parts):
+                        ip = parts[i + 1]
+                        break
+
+                # Format latency
+                if latency and latency != "n/a":
+                    # Convert from "2.470056507s" to "2.5s"
+                    if latency.endswith("ms"):
+                        lat_val = float(latency[:-2])
+                        latency = f"{lat_val:.0f}ms"
+                    elif latency.endswith("s"):
+                        lat_val = float(latency[:-1])
+                        if lat_val < 1:
+                            latency = f"{lat_val*1000:.0f}ms"
+                        else:
+                            latency = f"{lat_val:.1f}s"
+
+                if direction == 1:
+                    inbound_count += 1
+                    dir_str = "in"
+                elif direction == 2:
+                    outbound_count += 1
+                    dir_str = "out"
+                else:
+                    dir_str = "?"
+
+                # Get bandwidth for this peer
+                bw = peer_bw.get(peer_id, {})
+
+                peers.append({
+                    "ip": ip,
+                    "peer_id": peer_id,
+                    "latency": latency,
+                    "direction": dir_str,
+                    "country": _ip_country_cache.get(ip, ""),
+                    "total_in": bw.get("total_in", 0),
+                    "total_out": bw.get("total_out", 0),
+                    "rate_in": bw.get("rate_in", 0),
+                    "rate_out": bw.get("rate_out", 0),
+                })
+
+            # Sort by total bandwidth (highest first)
+            peers.sort(key=lambda x: -(x["total_in"] + x["total_out"]))
+
+            return JSONResponse({
+                "peers": peers,
+                "inbound": inbound_count,
+                "outbound": outbound_count,
+            })
+    except Exception:
+        pass
+
+    return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
 
 
 @app.route("/batch-narinfo", methods=["POST"])

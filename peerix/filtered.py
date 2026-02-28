@@ -2,6 +2,9 @@ import typing as t
 import fnmatch
 import logging
 import os
+import time
+
+import httpx
 
 from peerix.store import NarInfo, CacheInfo, Store
 
@@ -64,6 +67,84 @@ class FilteredStore(Store):
         if self._is_excluded(info.storePath):
             return None
         return info
+
+    def nar(self, url: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
+        return self.backend.nar(url)
+
+
+class NixpkgsFilteredStore(Store):
+    """
+    Filter store that only serves packages available in nixpkgs cache.
+
+    Checks cache.nixos.org to verify package exists before serving.
+    Uses a local cache to avoid repeated lookups.
+    """
+
+    def __init__(
+        self,
+        backend: Store,
+        cache_url: str = "https://cache.nixos.org",
+        cache_ttl: int = 3600,  # 1 hour
+        negative_ttl: int = 300,  # 5 minutes for "not found" results
+    ):
+        self.backend = backend
+        self.cache_url = cache_url.rstrip("/")
+        self.cache_ttl = cache_ttl
+        self.negative_ttl = negative_ttl
+        # Cache: hash -> (exists: bool, timestamp: float)
+        self._cache: t.Dict[str, t.Tuple[bool, float]] = {}
+        self._client: t.Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=10.0)
+        return self._client
+
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def _is_cached(self, hsh: str) -> t.Optional[bool]:
+        """Check local cache. Returns None if not cached or expired."""
+        if hsh not in self._cache:
+            return None
+        exists, ts = self._cache[hsh]
+        ttl = self.cache_ttl if exists else self.negative_ttl
+        if time.time() - ts > ttl:
+            del self._cache[hsh]
+            return None
+        return exists
+
+    async def _check_nixpkgs(self, hsh: str) -> bool:
+        """Check if hash exists in nixpkgs cache."""
+        # Check local cache first
+        cached = self._is_cached(hsh)
+        if cached is not None:
+            return cached
+
+        # Query cache.nixos.org
+        try:
+            client = await self._get_client()
+            resp = await client.head(f"{self.cache_url}/{hsh}.narinfo")
+            exists = resp.status_code == 200
+            self._cache[hsh] = (exists, time.time())
+            if not exists:
+                logger.debug(f"Filtered {hsh}: not in nixpkgs cache")
+            return exists
+        except Exception as e:
+            logger.warning(f"Failed to check nixpkgs cache for {hsh}: {e}")
+            # On error, allow the package (fail open)
+            return True
+
+    async def cache_info(self) -> CacheInfo:
+        return await self.backend.cache_info()
+
+    async def narinfo(self, hsh: str) -> t.Optional[NarInfo]:
+        # Check if exists in nixpkgs first
+        if not await self._check_nixpkgs(hsh):
+            return None
+        return await self.backend.narinfo(hsh)
 
     def nar(self, url: str) -> t.Awaitable[t.AsyncIterable[bytes]]:
         return self.backend.nar(url)

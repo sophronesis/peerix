@@ -96,6 +96,8 @@ serve_parser.add_argument("--ipfs-concurrency", type=int, default=10,
                     help="Number of parallel IPFS uploads (default: 10)")
 serve_parser.add_argument("--priority", type=int, default=5,
                     help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
+serve_parser.add_argument("--filter-mode", choices=["nixpkgs", "rules"], default="nixpkgs",
+                    help="Package filter mode: nixpkgs (only serve packages in cache.nixos.org, default) or rules (heuristic patterns)")
 
 # Status command
 status_parser = subparsers.add_parser("status", help="Show current scan progress")
@@ -116,6 +118,8 @@ parser.add_argument("--ipfs-concurrency", type=int, default=10,
                     help="Number of parallel IPFS uploads (default: 10)")
 parser.add_argument("--priority", type=int, default=5,
                     help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
+parser.add_argument("--filter-mode", choices=["nixpkgs", "rules"], default="nixpkgs",
+                    help="Package filter mode: nixpkgs (only serve packages in cache.nixos.org, default) or rules (heuristic patterns)")
 
 
 def run():
@@ -175,6 +179,7 @@ async def main(args):
         scan_interval=args.scan_interval,
         ipfs_concurrency=args.ipfs_concurrency,
         priority=args.priority,
+        filter_mode=args.filter_mode,
     ):
         async with trio.open_nursery() as nursery:
             # Start memory monitor (logs every 10 min)

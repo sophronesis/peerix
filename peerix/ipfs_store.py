@@ -106,11 +106,12 @@ class IPFSStore(Store):
         self._client: t.Optional[httpx.AsyncClient] = None
         self._cid_cache: t.Dict[str, str] = {}  # NarHash -> CID (in-memory)
         self._skipped_cache: t.Set[str] = set()  # Hashes that were skipped
-        self._announced_cache: t.Set[str] = set()  # CIDs announced to DHT
+        self._announced_cache: t.Dict[str, float] = {}  # CID -> timestamp of last announcement
         self._cache_dirty: bool = False  # Track if cache needs saving
         self._skipped_dirty: bool = False
         self._announced_dirty: bool = False
         self.announced_cache_path = cache_path.replace("cid_cache", "announced_cache")
+        self._reannounce_interval: float = 20 * 3600  # Re-announce after 20h (DHT expires at 24h)
         self._load_cache()
         self._load_skipped_cache()
         self._load_announced_cache()
@@ -124,6 +125,10 @@ class IPFSStore(Store):
             "skipped": 0,  # Already announced
             "started_at": None,
         }
+
+        # Pause states
+        self._scan_paused: bool = False
+        self._reannounce_paused: bool = False
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
@@ -226,6 +231,7 @@ class IPFSStore(Store):
                         eta_error = remaining_work * rate_std / (self._kalman_rate ** 2)
                         progress["eta_error_seconds"] = round(eta_error, 1)
 
+        progress["paused"] = self._scan_paused
         return progress
 
     def _reset_kalman(self) -> None:
@@ -356,22 +362,33 @@ class IPFSStore(Store):
             logger.warning(f"Failed to save skipped cache: {e}")
 
     def _load_announced_cache(self) -> None:
-        """Load announced CIDs from gzip-compressed JSON file."""
+        """Load announced CIDs with timestamps from gzip-compressed JSON file."""
+        import time
         try:
             if os.path.exists(self.announced_cache_path):
                 with gzip.open(self.announced_cache_path, "rt", encoding="utf-8") as f:
-                    self._announced_cache = set(json.load(f))
-                logger.info(f"Loaded {len(self._announced_cache)} announced CIDs from cache")
+                    data = json.load(f)
+                # Handle migration from old format (list) to new format (dict with timestamps)
+                if isinstance(data, list):
+                    # Old format: list of CIDs - assign old timestamp so they get re-announced
+                    old_time = time.time() - self._reannounce_interval - 3600  # Mark as expired
+                    self._announced_cache = {cid: old_time for cid in data}
+                    self._announced_dirty = True  # Save in new format
+                    logger.info(f"Migrated {len(self._announced_cache)} announced CIDs to timestamp format")
+                else:
+                    # New format: dict of CID -> timestamp
+                    self._announced_cache = data
+                    logger.info(f"Loaded {len(self._announced_cache)} announced CIDs from cache")
         except Exception as e:
             logger.warning(f"Failed to load announced cache: {e}")
-            self._announced_cache = set()
+            self._announced_cache = {}
 
     def _save_announced_cache(self) -> None:
-        """Save announced CIDs to gzip-compressed JSON file."""
+        """Save announced CIDs with timestamps to gzip-compressed JSON file."""
         try:
             os.makedirs(os.path.dirname(self.announced_cache_path), exist_ok=True)
             with gzip.open(self.announced_cache_path, "wt", encoding="utf-8") as f:
-                json.dump(list(self._announced_cache), f)
+                json.dump(self._announced_cache, f)
             self._announced_dirty = False
         except Exception as e:
             logger.warning(f"Failed to save announced cache: {e}")
@@ -397,10 +414,55 @@ class IPFSStore(Store):
             progress["percent"] = 0.0
             progress["eta_seconds"] = None
 
-        # Add count of unannounced CIDs
-        progress["pending"] = len(self._cid_cache) - len(self._announced_cache)
+        # Count CIDs needing announcement (not announced or expired)
+        now = time.time()
+        all_cids = set(self._cid_cache.values())
+        fresh_announced = sum(
+            1 for cid in all_cids
+            if cid in self._announced_cache
+            and (now - self._announced_cache[cid]) < self._reannounce_interval
+        )
+        pending = len(all_cids) - fresh_announced
+        progress["pending"] = pending
+        progress["fresh_announced"] = fresh_announced
+        progress["paused"] = self._reannounce_paused
+
+        # ETA for re-announce (based on pending count and rate of ~1 per 10s)
+        if pending > 0 and not self._reannounce_paused:
+            # Rate is approximately 1 CID per 10 seconds
+            progress["reannounce_eta_seconds"] = pending * 10
+        else:
+            progress["reannounce_eta_seconds"] = None
 
         return progress
+
+    def pause_scan(self) -> None:
+        """Pause the scan process."""
+        self._scan_paused = True
+        logger.info("Scan paused")
+
+    def resume_scan(self) -> None:
+        """Resume the scan process."""
+        self._scan_paused = False
+        logger.info("Scan resumed")
+
+    def pause_reannounce(self) -> None:
+        """Pause the DHT re-announcement process."""
+        self._reannounce_paused = True
+        logger.info("DHT re-announce paused")
+
+    def resume_reannounce(self) -> None:
+        """Resume the DHT re-announcement process."""
+        self._reannounce_paused = False
+        logger.info("DHT re-announce resumed")
+
+    def _needs_announcement(self, cid: str) -> bool:
+        """Check if a CID needs (re-)announcement to DHT."""
+        import time
+        if cid not in self._announced_cache:
+            return True
+        # Check if announcement has expired
+        return (time.time() - self._announced_cache[cid]) >= self._reannounce_interval
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with connection pooling."""
@@ -578,6 +640,7 @@ class IPFSStore(Store):
         Returns:
             True if announcement succeeded, False otherwise
         """
+        import time
         try:
             client = await self._get_client()
             # routing/provide announces our peer as a provider for this CID
@@ -588,7 +651,7 @@ class IPFSStore(Store):
             )
             if resp.status_code == 200:
                 logger.debug(f"Announced to DHT: {cid}")
-                self._announced_cache.add(cid)
+                self._announced_cache[cid] = time.time()
                 self._announced_dirty = True
                 self._total_dht_announced += 1
                 if self._scan_progress["active"]:
@@ -628,15 +691,20 @@ class IPFSStore(Store):
         import time
         logger.info(f"Starting DHT announcement phase (concurrency={concurrency}, force={force})...")
 
-        # Get CIDs to announce
+        # Get CIDs to announce (not announced or expired)
+        now = time.time()
         all_cids = set(self._cid_cache.values())
         if force:
             cids_to_announce = list(all_cids)
         else:
-            cids_to_announce = [cid for cid in all_cids if cid not in self._announced_cache]
+            cids_to_announce = [
+                cid for cid in all_cids
+                if cid not in self._announced_cache
+                or (now - self._announced_cache[cid]) >= self._reannounce_interval
+            ]
 
         already_announced = len(all_cids) - len(cids_to_announce)
-        logger.info(f"CIDs to announce: {len(cids_to_announce)} (already announced: {already_announced})")
+        logger.info(f"CIDs to announce: {len(cids_to_announce)} (fresh: {already_announced})")
 
         if not cids_to_announce:
             logger.info("No CIDs need announcing")
@@ -879,6 +947,10 @@ class IPFSStore(Store):
         self,
         extra_patterns: t.List[str] = None,
         concurrency: int = 10,
+        dht_concurrency: int = 1,  # Single-threaded to avoid floods
+        announce_to_dht: bool = True,
+        dht_announce_delay: float = 2.0,  # Seconds between announcements
+        dht_max_per_scan: int = 50,  # Max announcements per scan cycle
     ) -> t.Tuple[int, int]:
         """
         Scan local nix store and publish applicable packages to IPFS.
@@ -887,16 +959,19 @@ class IPFSStore(Store):
         Before publishing, checks tracker for existing CIDs to avoid
         re-uploading content that's already in the network.
         Uploads are parallelized with configurable concurrency.
+        DHT announcements run in parallel with scanning.
 
         Args:
             extra_patterns: Additional fnmatch patterns to exclude
             concurrency: Maximum number of parallel IPFS uploads (default: 10)
+            dht_concurrency: Maximum parallel DHT announcements (default: 3)
+            announce_to_dht: Whether to announce CIDs to DHT in parallel (default: True)
 
         Returns:
             Tuple of (published_count, skipped_count)
         """
         import time
-        logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency})...")
+        logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency}, dht_concurrency={dht_concurrency})...")
 
         # Fetch existing CIDs from tracker to avoid re-publishing
         tracker_cids: t.Dict[str, str] = {}
@@ -936,6 +1011,10 @@ class IPFSStore(Store):
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
         semaphore = trio.Semaphore(concurrency)
+
+        # DHT announcement channel - CIDs are sent here for parallel announcement
+        dht_send_channel, dht_recv_channel = trio.open_memory_channel(1000)
+        dht_semaphore = trio.Semaphore(dht_concurrency)
 
         async def publish_one(hsh: str) -> None:
             """Publish a single store path to IPFS."""
@@ -997,6 +1076,12 @@ class IPFSStore(Store):
                         self._scan_progress["from_tracker"] = counters["from_tracker"]
                         self._scan_progress["processed"] += 1
                         logger.debug(f"Using tracker CID for {hsh}: {cid}")
+                        # Also queue for DHT announcement (original announcement may have expired)
+                        if announce_to_dht and self._needs_announcement(cid):
+                            try:
+                                dht_send_channel.send_nowait(cid)
+                            except trio.WouldBlock:
+                                pass  # Channel full, will be announced later
                         return
 
                     # Not on tracker - publish to IPFS
@@ -1011,6 +1096,12 @@ class IPFSStore(Store):
                                 await self.tracker_client.register_cid(hsh, cid)
                             except Exception as e:
                                 logger.debug(f"Failed to register CID: {e}")
+                        # Queue for DHT announcement (parallel with scan)
+                        if announce_to_dht and self._needs_announcement(cid):
+                            try:
+                                dht_send_channel.send_nowait(cid)
+                            except trio.WouldBlock:
+                                pass  # Channel full, skip this one
                     else:
                         self._skipped_cache.add(hsh)
                         self._skipped_dirty = True
@@ -1043,15 +1134,54 @@ class IPFSStore(Store):
                 if self._skipped_dirty:
                     self._save_skipped_cache()
                     logger.debug("Periodic save: skipped cache")
+                if self._announced_dirty:
+                    self._save_announced_cache()
+                    logger.debug("Periodic save: announced cache")
+
+        async def dht_announcer() -> None:
+            """Background task that announces CIDs to DHT with rate limiting."""
+            announced_count = 0
+            failed_count = 0
+            skipped_count = 0
+            async with dht_recv_channel:
+                async for cid in dht_recv_channel:
+                    # Stop if we've hit the per-scan limit
+                    if announced_count >= dht_max_per_scan:
+                        skipped_count += 1
+                        continue
+
+                    async with dht_semaphore:
+                        try:
+                            success = await self.announce_to_dht(cid)
+                            if success:
+                                announced_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as e:
+                            logger.debug(f"DHT announce error: {e}")
+                            failed_count += 1
+
+                        # Delay between announcements to avoid flooding
+                        if dht_announce_delay > 0:
+                            await trio.sleep(dht_announce_delay)
+
+            logger.info(
+                f"DHT announcer finished: {announced_count} announced, "
+                f"{failed_count} failed, {skipped_count} skipped (limit={dht_max_per_scan})"
+            )
 
         async def run_scan_work() -> None:
-            async with trio.open_nursery() as work_nursery:
-                for hsh in store_hashes:
-                    work_nursery.start_soon(publish_one, hsh)
+            async with dht_send_channel:
+                async with trio.open_nursery() as work_nursery:
+                    for hsh in store_hashes:
+                        work_nursery.start_soon(publish_one, hsh)
+            # Channel closes when scan work completes, signaling announcer to finish
 
-        # Run work and periodic save in parallel
+        # Run work, DHT announcer, and periodic save in parallel
         async with trio.open_nursery() as nursery:
             nursery.start_soon(periodic_save)
+            if announce_to_dht:
+                nursery.start_soon(dht_announcer)
             await run_scan_work()
             scan_done_event.set()  # Signal periodic_save to exit
 
@@ -1060,6 +1190,8 @@ class IPFSStore(Store):
             self._save_cache()
         if self._skipped_dirty:
             self._save_skipped_cache()
+        if self._announced_dirty:
+            self._save_announced_cache()
 
         # Mark scan as complete
         self._scan_progress["active"] = False
@@ -1094,12 +1226,117 @@ class IPFSStore(Store):
         logger.info(f"Starting periodic IPFS store scan (interval={interval}s, concurrency={concurrency})")
 
         while True:
+            # Check if paused
+            while self._scan_paused:
+                await trio.sleep(5)
+
             try:
-                published, skipped = await self.scan_and_publish(extra_patterns, concurrency)
+                if not self._scan_paused:
+                    published, skipped = await self.scan_and_publish(extra_patterns, concurrency)
             except Exception as e:
                 logger.warning(f"Periodic scan failed: {e}")
 
             await trio.sleep(interval)
+
+    async def run_periodic_reannounce(
+        self,
+        concurrency: int = 2,
+        batch_size: int = 10,
+        batch_delay: float = 30.0,
+    ) -> None:
+        """
+        Run periodic DHT re-announcements to keep content discoverable.
+
+        DHT provider records expire after ~24h. This task:
+        1. Starts PAUSED by default to avoid network flooding
+        2. When resumed: batch-announces pending CIDs slowly
+        3. Continuously: re-announces expiring CIDs spread evenly over 24h
+
+        Args:
+            concurrency: Max parallel announcements (default: 2)
+            batch_size: CIDs per batch (default: 10, very conservative)
+            batch_delay: Seconds between batches (default: 30)
+        """
+        import time
+        logger.info(f"Starting periodic DHT re-announcement (concurrency={concurrency})")
+
+        # Wait for initial scan to populate CID cache
+        await trio.sleep(30)
+
+        while True:
+            try:
+                # Check if paused
+                while self._reannounce_paused:
+                    await trio.sleep(5)
+
+                now = time.time()
+                all_cids = set(self._cid_cache.values())
+
+                # Find CIDs needing announcement
+                pending_cids = [
+                    cid for cid in all_cids
+                    if self._needs_announcement(cid)
+                ]
+
+                if pending_cids and not self._reannounce_paused:
+                    logger.info(f"DHT re-announce: {len(pending_cids)} CIDs pending")
+
+                    # Batch announce with rate limiting
+                    semaphore = trio.Semaphore(concurrency)
+                    announced = 0
+                    failed = 0
+
+                    for i in range(0, len(pending_cids), batch_size):
+                        # Check if paused mid-batch
+                        if self._reannounce_paused:
+                            logger.info("DHT re-announce paused mid-batch")
+                            break
+
+                        batch = pending_cids[i:i + batch_size]
+
+                        async def announce_one(cid: str) -> bool:
+                            async with semaphore:
+                                return await self.announce_to_dht(cid)
+
+                        async with trio.open_nursery() as nursery:
+                            results = []
+                            for cid in batch:
+                                nursery.start_soon(announce_one, cid)
+
+                        # Count results (announce_to_dht updates internal counters)
+                        batch_announced = sum(
+                            1 for cid in batch
+                            if cid in self._announced_cache
+                            and self._announced_cache[cid] > now
+                        )
+                        announced += batch_announced
+                        failed += len(batch) - batch_announced
+
+                        logger.debug(f"DHT batch {i//batch_size + 1}: {batch_announced}/{len(batch)} announced")
+
+                        # Delay between batches
+                        if i + batch_size < len(pending_cids):
+                            await trio.sleep(batch_delay)
+
+                    # Save cache
+                    if self._announced_dirty:
+                        self._save_announced_cache()
+
+                    logger.info(f"DHT re-announce complete: {announced} announced, {failed} failed")
+
+                # Calculate sleep until next check
+                # Spread checks evenly: check every (reannounce_interval / num_cids) seconds
+                # But at least every 5 minutes, at most every hour
+                if all_cids:
+                    check_interval = max(300, min(3600, self._reannounce_interval / max(len(all_cids), 1)))
+                else:
+                    check_interval = 300  # Check every 5 min if no CIDs
+
+                await trio.sleep(check_interval)
+
+            except Exception as e:
+                logger.warning(f"DHT re-announce error: {e}")
+                await trio.sleep(60)  # Retry after 1 minute on error
 
 
 class IPFSNarInfoStore(Store):
