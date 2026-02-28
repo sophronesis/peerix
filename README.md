@@ -139,6 +139,23 @@ Configuration Options
 | `services.peerix.networkId`           | Network ID for peer isolation. Peers must share the same ID.                             | `"default"` |
 | `services.peerix.listenAddrs`         | LibP2P listen addresses. Note: py-libp2p 0.6.0 only supports TCP.                        | `["/ip4/0.0.0.0/tcp/{port+1000}"]` |
 
+### IPFS Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `services.peerix.ipfs.enable` | Enable IPFS integration. | `true` |
+| `services.peerix.ipfs.configureKubo` | Auto-configure kubo daemon with recommended settings. | `true` |
+| `services.peerix.ipfs.lowBandwidth` | **Enable conservative settings for limited networks.** Disables QUIC, sets low connection limits (2/5), rate limits to 3 MiB/s. | `true` |
+| `services.peerix.ipfs.routingType` | DHT mode: `"dhtclient"`, `"dht"`, `"dhtserver"`, `"none"`, `"autoclient"`. | `"dhtclient"` |
+| `services.peerix.ipfs.enableQUIC` | Enable QUIC/UDP transport. Disable if network gets flooded. | `true` (off in lowBandwidth) |
+| `services.peerix.ipfs.acceleratedDHTClient` | Enable accelerated DHT client for faster lookups. | `false` |
+| `services.peerix.ipfs.connMgr.lowWater` | Start pruning connections above this. | `600` (5 in lowBandwidth) |
+| `services.peerix.ipfs.connMgr.highWater` | Hard connection limit. | `900` (10 in lowBandwidth) |
+| `services.peerix.ipfs.resourceMgr.connsInbound` | Max inbound connections. | auto (7 in lowBandwidth) |
+| `services.peerix.ipfs.resourceMgr.connsOutbound` | Max outbound connections. | auto (7 in lowBandwidth) |
+| `services.peerix.ipfs.rateLimit.enable` | Enable iptables rate limiting for IPFS. | `false` (true in lowBandwidth) |
+| `services.peerix.ipfs.rateLimit.totalBandwidth` | Hard cap on total IPFS bandwidth (KiB/s). | `null` (3072 in lowBandwidth) |
+
 ### Tracker Service
 
 Run your own tracker for private networks or as a public bootstrap node:
@@ -150,6 +167,28 @@ Run your own tracker for private networks or as a public bootstrap node:
 | `services.peerix-tracker.dbPath`      | Path to the tracker SQLite database.                                                     | `"/var/lib/peerix-tracker/tracker.db"` |
 | `services.peerix-tracker.openFirewall`| Open the firewall for the tracker port.                                                  | `true`    |
 | `services.peerix-tracker.package`     | The peerix package to use.                                                               | `pkgs.peerix-full` |
+
+Dashboard
+---------
+
+Peerix includes a web dashboard for monitoring at `http://localhost:12304/dashboard`:
+
+- **Scan Progress**: Current store scan status with ETA
+- **DHT Announce**: DHT announcement progress with pause/resume controls
+- **IPFS Swarm Peers**: Connected peers with per-peer bandwidth stats
+- **Controls**: Stop IPFS button for emergencies
+
+The dashboard auto-refreshes and reloads when peerix is updated.
+
+Scripts
+-------
+
+Utility scripts in `scripts/`:
+
+- `network_watchdog.sh` - Monitor network connectivity and auto-kill IPFS/peerix if unresponsive
+- `diagnose_network.sh` - Network diagnostics for troubleshooting
+- `monitor_flood.sh` - Monitor for network flooding
+- `ipfs_dashboard.sh` - Quick IPFS stats
 
 WAN Mode
 --------
