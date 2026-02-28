@@ -126,6 +126,10 @@ class IPFSStore(Store):
             "started_at": None,
         }
 
+        # Pause states
+        self._scan_paused: bool = False
+        self._reannounce_paused: bool = False
+
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
         self.tracker_client = tracker_client
@@ -227,6 +231,7 @@ class IPFSStore(Store):
                         eta_error = remaining_work * rate_std / (self._kalman_rate ** 2)
                         progress["eta_error_seconds"] = round(eta_error, 1)
 
+        progress["paused"] = self._scan_paused
         return progress
 
     def _reset_kalman(self) -> None:
@@ -419,8 +424,29 @@ class IPFSStore(Store):
         )
         progress["pending"] = len(all_cids) - fresh_announced
         progress["fresh_announced"] = fresh_announced
+        progress["paused"] = self._reannounce_paused
 
         return progress
+
+    def pause_scan(self) -> None:
+        """Pause the scan process."""
+        self._scan_paused = True
+        logger.info("Scan paused")
+
+    def resume_scan(self) -> None:
+        """Resume the scan process."""
+        self._scan_paused = False
+        logger.info("Scan resumed")
+
+    def pause_reannounce(self) -> None:
+        """Pause the DHT re-announcement process."""
+        self._reannounce_paused = True
+        logger.info("DHT re-announce paused")
+
+    def resume_reannounce(self) -> None:
+        """Resume the DHT re-announcement process."""
+        self._reannounce_paused = False
+        logger.info("DHT re-announce resumed")
 
     def _needs_announcement(self, cid: str) -> bool:
         """Check if a CID needs (re-)announcement to DHT."""
@@ -1192,8 +1218,13 @@ class IPFSStore(Store):
         logger.info(f"Starting periodic IPFS store scan (interval={interval}s, concurrency={concurrency})")
 
         while True:
+            # Check if paused
+            while self._scan_paused:
+                await trio.sleep(5)
+
             try:
-                published, skipped = await self.scan_and_publish(extra_patterns, concurrency)
+                if not self._scan_paused:
+                    published, skipped = await self.scan_and_publish(extra_patterns, concurrency)
             except Exception as e:
                 logger.warning(f"Periodic scan failed: {e}")
 
@@ -1225,6 +1256,10 @@ class IPFSStore(Store):
 
         while True:
             try:
+                # Check if paused
+                while self._reannounce_paused:
+                    await trio.sleep(5)
+
                 now = time.time()
                 all_cids = set(self._cid_cache.values())
 
@@ -1234,7 +1269,7 @@ class IPFSStore(Store):
                     if self._needs_announcement(cid)
                 ]
 
-                if pending_cids:
+                if pending_cids and not self._reannounce_paused:
                     logger.info(f"DHT re-announce: {len(pending_cids)} CIDs pending")
 
                     # Batch announce with rate limiting
@@ -1243,6 +1278,11 @@ class IPFSStore(Store):
                     failed = 0
 
                     for i in range(0, len(pending_cids), batch_size):
+                        # Check if paused mid-batch
+                        if self._reannounce_paused:
+                            logger.info("DHT re-announce paused mid-batch")
+                            break
+
                         batch = pending_cids[i:i + batch_size]
 
                         async def announce_one(cid: str) -> bool:

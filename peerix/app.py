@@ -309,6 +309,50 @@ async def announce_status(req: Request) -> Response:
     return JSONResponse(progress)
 
 
+@app.route("/scan/pause", methods=["POST"])
+async def pause_scan(req: Request) -> Response:
+    """Pause the scan process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].pause_scan()
+    return JSONResponse({"status": "paused"})
+
+
+@app.route("/scan/resume", methods=["POST"])
+async def resume_scan(req: Request) -> Response:
+    """Resume the scan process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].resume_scan()
+    return JSONResponse({"status": "resumed"})
+
+
+@app.route("/reannounce/pause", methods=["POST"])
+async def pause_reannounce(req: Request) -> Response:
+    """Pause the DHT re-announcement process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].pause_reannounce()
+    return JSONResponse({"status": "paused"})
+
+
+@app.route("/reannounce/resume", methods=["POST"])
+async def resume_reannounce(req: Request) -> Response:
+    """Resume the DHT re-announcement process. Localhost only."""
+    if req.client.host not in ("127.0.0.1", "::1"):
+        return Response(content="Permission denied.", status_code=403)
+    if ipfs_access is None:
+        return JSONResponse({"error": "IPFS mode not enabled"}, status_code=404)
+    ipfs_access["store"].resume_reannounce()
+    return JSONResponse({"status": "resumed"})
+
+
 @app.route("/announce", methods=["POST"])
 async def start_dht_announce(req: Request) -> Response:
     """
@@ -508,6 +552,21 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             color: #00d9ff;
             margin-top: 8px;
         }
+        .ctrl-btn {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 8px;
+        }
+        .ctrl-btn:hover { background: #2a2a3e; }
+        .ctrl-btn.danger { border-color: #ff4444; color: #ff4444; }
+        .ctrl-btn.danger:hover { background: #ff444422; }
+        .ctrl-btn.paused { color: #ff9500; border-color: #ff9500; }
+        .ctrl-btn.running { color: #00ff88; border-color: #00ff88; }
         .error-msg {
             background: #ff444433;
             border: 1px solid #ff4444;
@@ -546,8 +605,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         <div class="card">
             <h2>Progress</h2>
             <div style="margin-bottom: 16px;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                    <span style="color: #888;">Scan</span>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="color: #888;">Scan <button class="ctrl-btn" id="scan-toggle" onclick="toggleScan()" title="Pause/Resume">▶</button></span>
                     <span id="percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
@@ -555,8 +614,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <div class="current-path" id="current-path"></div>
             </div>
             <div>
-                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                    <span style="color: #888;">DHT Announce</span>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="color: #888;">DHT Announce <button class="ctrl-btn" id="dht-toggle" onclick="toggleDHT()" title="Pause/Resume">▶</button></span>
                     <span id="announce-percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>
@@ -565,6 +624,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     <span id="announce-announced">0</span> announced,
                     <span id="announce-pending">0</span> pending
                 </div>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Controls</h2>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="ctrl-btn danger" onclick="stopIPFS()" title="Stop IPFS daemon">Stop IPFS</button>
             </div>
         </div>
         <div class="card">
@@ -672,6 +737,29 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         }
 
         let lastVersion = null;
+        let scanPaused = false;
+        let dhtPaused = false;
+
+        async function toggleScan() {
+            const endpoint = scanPaused ? '/scan/resume' : '/scan/pause';
+            await fetch(endpoint, { method: 'POST' });
+        }
+
+        async function toggleDHT() {
+            const endpoint = dhtPaused ? '/reannounce/resume' : '/reannounce/pause';
+            await fetch(endpoint, { method: 'POST' });
+        }
+
+        async function stopIPFS() {
+            if (confirm('Stop IPFS daemon? This will disable all IPFS functionality.')) {
+                try {
+                    await fetch('http://127.0.0.1:5001/api/v0/shutdown', { method: 'POST' });
+                    alert('IPFS shutdown requested');
+                } catch (e) {
+                    alert('Failed to stop IPFS: ' + e.message);
+                }
+            }
+        }
 
         async function update() {
             try {
@@ -801,6 +889,33 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 } else {
                     announceActiveEl.textContent = 'No';
                     announceActiveEl.style.color = '#888';
+                }
+
+                // Update pause states and buttons
+                scanPaused = scan.paused || false;
+                dhtPaused = announce.paused || false;
+
+                const scanToggle = document.getElementById('scan-toggle');
+                const dhtToggle = document.getElementById('dht-toggle');
+
+                if (scanPaused) {
+                    scanToggle.textContent = '▶';
+                    scanToggle.className = 'ctrl-btn paused';
+                    scanToggle.title = 'Resume scan';
+                } else {
+                    scanToggle.textContent = '⏸';
+                    scanToggle.className = 'ctrl-btn running';
+                    scanToggle.title = 'Pause scan';
+                }
+
+                if (dhtPaused) {
+                    dhtToggle.textContent = '▶';
+                    dhtToggle.className = 'ctrl-btn paused';
+                    dhtToggle.title = 'Resume DHT announce';
+                } else {
+                    dhtToggle.textContent = '⏸';
+                    dhtToggle.className = 'ctrl-btn running';
+                    dhtToggle.title = 'Pause DHT announce';
                 }
 
                 // IPFS Peers and Bandwidth
