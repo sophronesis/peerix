@@ -85,6 +85,13 @@ async def setup_stores(
                             filter_patterns,
                             ipfs_concurrency,
                         )
+                    # Start periodic DHT re-announcement
+                    nursery.start_soon(
+                        ipfs_info["store"].run_periodic_reannounce,
+                        3,   # concurrency
+                        100, # batch_size
+                        5.0, # batch_delay
+                    )
                     yield
                     nursery.cancel_scope.cancel()
             finally:
