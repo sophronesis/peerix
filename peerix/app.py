@@ -651,6 +651,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-value" id="announce-active">--</span>
             </div>
             <div class="status-row">
+                <span class="status-label">Reannouncing</span>
+                <span class="status-value" id="reannounce-active">--</span>
+            </div>
+            <div class="status-row">
                 <span class="status-label">Tracker</span>
                 <span class="status-value" id="tracker-url" style="font-size: 0.8em;">--</span>
             </div>
@@ -885,7 +889,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     activeEl.style.color = '#888';
                 }
 
-                // Announce active
+                // Announce active (manual)
                 const announceActiveEl = document.getElementById('announce-active');
                 if (announce.active) {
                     announceActiveEl.textContent = 'Yes';
@@ -893,6 +897,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 } else {
                     announceActiveEl.textContent = 'No';
                     announceActiveEl.style.color = '#888';
+                }
+
+                // Reannounce status (background)
+                const reannounceActiveEl = document.getElementById('reannounce-active');
+                if (announce.paused) {
+                    reannounceActiveEl.textContent = 'Paused';
+                    reannounceActiveEl.style.color = '#888';
+                } else {
+                    reannounceActiveEl.textContent = 'Running';
+                    reannounceActiveEl.style.color = '#4cd964';
                 }
 
                 // Update pause states and buttons
