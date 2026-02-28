@@ -90,7 +90,7 @@ async def setup_stores(
                         ipfs_info["store"].run_periodic_reannounce,
                         1,    # concurrency (1 at a time)
                         1,    # batch_size (1 CID at a time)
-                        1.0,  # batch_delay (1s between announcements)
+                        3.0,  # batch_delay (3s between announcements)
                     )
                     yield
                     nursery.cancel_scope.cancel()
