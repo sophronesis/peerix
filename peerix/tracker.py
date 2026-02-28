@@ -31,6 +31,16 @@ def init_db(db_path: str) -> sqlite3.Connection:
             last_seen REAL NOT NULL
         )
     """)
+    # Iroh peers table: stores Iroh node IDs and addresses for NAT traversal
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS iroh_peers (
+            node_id TEXT PRIMARY KEY,
+            peer_id TEXT NOT NULL,
+            relay_url TEXT,
+            direct_addrs TEXT,
+            last_seen REAL NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transfers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +102,7 @@ async def cleanup_stale_peers(conn):
         cutoff = time.time() - PEER_TTL
         conn.execute("DELETE FROM peers WHERE last_seen < ?", (cutoff,))
         conn.execute("DELETE FROM packages WHERE last_seen < ?", (cutoff,))
+        conn.execute("DELETE FROM iroh_peers WHERE last_seen < ?", (cutoff,))
         conn.commit()
 
 
@@ -488,6 +499,88 @@ def create_tracker_app(db_path: str) -> Starlette:
 
         logger.info(f"Delta sync: peer {peer_id} added {len(added)}, removed {len(removed)}")
         return JSONResponse({"status": "ok", "added": len(added), "removed": len(removed)})
+
+    # ========== Iroh P2P endpoints ==========
+
+    @app.route("/iroh/announce", methods=["POST"])
+    async def iroh_announce(req: Request) -> Response:
+        """Announce an Iroh peer with its node ID and addresses."""
+        body = await req.json()
+        node_id = body.get("node_id")
+        peer_id = body.get("peer_id")
+        relay_url = body.get("relay_url")
+        direct_addrs = body.get("direct_addrs", [])
+
+        if not node_id or not peer_id:
+            return JSONResponse({"error": "node_id and peer_id required"}, status_code=400)
+
+        now = time.time()
+        # Store direct_addrs as JSON string
+        addrs_json = json.dumps(direct_addrs) if direct_addrs else "[]"
+
+        conn.execute(
+            "INSERT INTO iroh_peers (node_id, peer_id, relay_url, direct_addrs, last_seen) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(node_id) DO UPDATE SET peer_id=?, relay_url=?, direct_addrs=?, last_seen=?",
+            (node_id, peer_id, relay_url, addrs_json, now, peer_id, relay_url, addrs_json, now)
+        )
+        conn.commit()
+
+        logger.info(f"Iroh peer announced: {node_id[:16]}... (peer={peer_id}, relay={relay_url}, addrs={len(direct_addrs)})")
+        return JSONResponse({"status": "ok"})
+
+    @app.route("/iroh/peers", methods=["GET"])
+    async def iroh_list_peers(req: Request) -> Response:
+        """List all active Iroh peers with their addresses."""
+        cutoff = time.time() - PEER_TTL
+        rows = conn.execute(
+            "SELECT node_id, peer_id, relay_url, direct_addrs, last_seen "
+            "FROM iroh_peers WHERE last_seen >= ?",
+            (cutoff,)
+        ).fetchall()
+
+        peers = []
+        for row in rows:
+            try:
+                direct_addrs = json.loads(row[3]) if row[3] else []
+            except json.JSONDecodeError:
+                direct_addrs = []
+
+            peers.append({
+                "node_id": row[0],
+                "peer_id": row[1],
+                "relay_url": row[2],
+                "direct_addrs": direct_addrs,
+                "last_seen": row[4],
+            })
+
+        return JSONResponse({"peers": peers, "count": len(peers)})
+
+    @app.route("/iroh/peer/{node_id:str}", methods=["GET"])
+    async def iroh_get_peer(req: Request) -> Response:
+        """Get a specific Iroh peer by node_id."""
+        node_id = req.path_params["node_id"]
+        row = conn.execute(
+            "SELECT node_id, peer_id, relay_url, direct_addrs, last_seen "
+            "FROM iroh_peers WHERE node_id = ?",
+            (node_id,)
+        ).fetchone()
+
+        if row is None:
+            return JSONResponse({"error": "peer not found"}, status_code=404)
+
+        try:
+            direct_addrs = json.loads(row[3]) if row[3] else []
+        except json.JSONDecodeError:
+            direct_addrs = []
+
+        return JSONResponse({
+            "node_id": row[0],
+            "peer_id": row[1],
+            "relay_url": row[2],
+            "direct_addrs": direct_addrs,
+            "last_seen": row[4],
+        })
 
     return app
 

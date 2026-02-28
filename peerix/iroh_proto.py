@@ -10,9 +10,15 @@ import logging
 import typing as t
 from dataclasses import dataclass
 
+import httpx
 import iroh
 
 logger = logging.getLogger(__name__)
+
+# Tracker announce interval (seconds)
+ANNOUNCE_INTERVAL = 60
+# Peer discovery interval (seconds)
+DISCOVERY_INTERVAL = 30
 
 # Protocol identifiers (ALPN)
 NARINFO_PROTOCOL = b"peerix/narinfo/1"
@@ -138,16 +144,20 @@ class IrohNode:
     - Connecting to peers by public key
     """
 
-    def __init__(self, local_store, tracker_url: str = None):
+    def __init__(self, local_store, tracker_url: str = None, peer_id: str = None):
         self.local_store = local_store
-        self.tracker_url = tracker_url
+        self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
+        self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID
         self.iroh: t.Optional[iroh.Iroh] = None
         self.node: t.Optional[iroh.Node] = None
         self.endpoint: t.Optional[iroh.Endpoint] = None
         self.net: t.Optional[iroh.Net] = None
         self._running = False
+        self._node_id: t.Optional[str] = None
         # Store known peer addresses: node_id (str) -> NodeAddr
         self._known_peers: t.Dict[str, iroh.NodeAddr] = {}
+        # HTTP client for tracker communication
+        self._http_client: t.Optional[httpx.AsyncClient] = None
 
     async def start(self):
         """Start the Iroh node."""
@@ -174,8 +184,8 @@ class IrohNode:
         self.endpoint = self.node.endpoint()
         self.net = self.iroh.net()
 
-        node_id = await self.net.node_id()
-        logger.info(f"Iroh node started with ID: {node_id}")
+        self._node_id = str(await self.net.node_id())
+        logger.info(f"Iroh node started with ID: {self._node_id}")
 
         # Get our addresses for sharing
         node_addr = await self.net.node_addr()
@@ -183,7 +193,13 @@ class IrohNode:
 
         self._running = True
 
-        return str(node_id)
+        # Initialize HTTP client for tracker
+        if self.tracker_url:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0)
+            )
+
+        return self._node_id
 
     async def stop(self):
         """Stop the Iroh node."""
@@ -291,6 +307,124 @@ class IrohNode:
             if not chunk:
                 break
             yield chunk
+
+    # ========== Tracker Integration ==========
+
+    async def announce_to_tracker(self) -> bool:
+        """Announce our Iroh node to the tracker."""
+        if not self.tracker_url or not self._http_client:
+            return False
+
+        try:
+            node_addr = await self.get_node_addr()
+            if not node_addr:
+                return False
+
+            # Extract address info
+            relay_url = node_addr.relay_url()
+            direct_addrs = node_addr.direct_addresses()
+
+            payload = {
+                "node_id": self._node_id,
+                "peer_id": self.peer_id,
+                "relay_url": relay_url,
+                "direct_addrs": direct_addrs,
+            }
+
+            resp = await self._http_client.post(
+                f"{self.tracker_url}/iroh/announce",
+                json=payload,
+                timeout=30.0,
+            )
+
+            if resp.status_code == 200:
+                logger.info(f"Announced to tracker: {self._node_id[:16]}...")
+                return True
+            else:
+                logger.warning(f"Tracker announce failed: {resp.status_code}")
+                return False
+
+        except Exception as e:
+            logger.warning(f"Tracker announce error: {e}")
+            return False
+
+    async def discover_peers(self) -> t.List[t.Dict]:
+        """Discover Iroh peers from the tracker."""
+        if not self.tracker_url or not self._http_client:
+            return []
+
+        try:
+            resp = await self._http_client.get(
+                f"{self.tracker_url}/iroh/peers",
+                timeout=30.0,
+            )
+
+            if resp.status_code != 200:
+                logger.warning(f"Peer discovery failed: {resp.status_code}")
+                return []
+
+            data = resp.json()
+            peers = data.get("peers", [])
+
+            # Filter out ourselves
+            peers = [p for p in peers if p["node_id"] != self._node_id]
+            logger.debug(f"Discovered {len(peers)} peers from tracker")
+            return peers
+
+        except Exception as e:
+            logger.warning(f"Peer discovery error: {e}")
+            return []
+
+    async def add_peer_from_tracker(self, peer_info: t.Dict) -> bool:
+        """Add a peer using info from the tracker."""
+        try:
+            node_id = peer_info["node_id"]
+            relay_url = peer_info.get("relay_url")
+            direct_addrs = peer_info.get("direct_addrs", [])
+
+            # Create PublicKey from node_id string
+            pub_key = iroh.PublicKey.from_string(node_id)
+
+            # Create NodeAddr with address info
+            node_addr = iroh.NodeAddr(pub_key, relay_url, direct_addrs)
+
+            # Add to our known peers
+            await self.add_peer(node_id, node_addr)
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to add peer from tracker: {e}")
+            return False
+
+    async def sync_with_tracker(self):
+        """Announce ourselves and discover peers from tracker."""
+        if not self.tracker_url:
+            return
+
+        # Announce ourselves
+        await self.announce_to_tracker()
+
+        # Discover and add peers
+        peers = await self.discover_peers()
+        for peer_info in peers:
+            if peer_info["node_id"] not in self._known_peers:
+                await self.add_peer_from_tracker(peer_info)
+
+    async def run_tracker_sync(self):
+        """Background task to periodically sync with tracker."""
+        if not self.tracker_url:
+            logger.info("No tracker URL configured, skipping tracker sync")
+            return
+
+        logger.info(f"Starting tracker sync with {self.tracker_url}")
+
+        while self._running:
+            try:
+                await self.sync_with_tracker()
+            except Exception as e:
+                logger.warning(f"Tracker sync error: {e}")
+
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
 
 
 async def test_single_node():
@@ -400,12 +534,127 @@ async def test_two_nodes():
         print("\nBoth nodes stopped", flush=True)
 
 
+async def test_tracker_connectivity(tracker_url: str, peer_id: str):
+    """Test Iroh node with tracker integration."""
+    print(f"\nTesting Iroh node with tracker: {tracker_url}", flush=True)
+
+    class MockNarInfo:
+        def __init__(self, content):
+            self.content = content
+        def dump(self):
+            return self.content
+
+    class MockStore:
+        def __init__(self, name):
+            self.name = name
+
+        async def narinfo(self, hash):
+            print(f"[{self.name}] narinfo requested for {hash}", flush=True)
+            content = f"StorePath: /nix/store/{hash}-{self.name}\nNarHash: sha256:{self.name}\nNarSize: 100\nReferences:\n"
+            return MockNarInfo(content)
+
+        async def nar(self, url):
+            yield f"NAR data from {self.name}".encode()
+
+    store = MockStore(peer_id)
+    node = IrohNode(store, tracker_url=tracker_url, peer_id=peer_id)
+
+    try:
+        # Start node
+        print("Starting Iroh node...", flush=True)
+        node_id = await node.start()
+        print(f"Node ID: {node_id}", flush=True)
+
+        # Get and display our address
+        node_addr = await node.get_node_addr()
+        relay_url = node_addr.relay_url()
+        direct_addrs = node_addr.direct_addresses()
+        print(f"Relay URL: {relay_url}", flush=True)
+        print(f"Direct addresses: {direct_addrs}", flush=True)
+
+        # Sync with tracker
+        print("\nSyncing with tracker...", flush=True)
+        await node.sync_with_tracker()
+
+        # Show discovered peers
+        print(f"\nKnown peers: {len(node._known_peers)}", flush=True)
+        for pid, addr in node._known_peers.items():
+            print(f"  - {pid[:16]}...", flush=True)
+
+        # If we have peers, try to fetch narinfo from each
+        if node._known_peers:
+            print("\nTesting connectivity to peers...", flush=True)
+            for peer_node_id in node._known_peers:
+                print(f"\nConnecting to {peer_node_id[:16]}...", flush=True)
+                try:
+                    narinfo = await asyncio.wait_for(
+                        node.fetch_narinfo(peer_node_id, "testhash"),
+                        timeout=10.0
+                    )
+                    if narinfo:
+                        print(f"  SUCCESS! Got narinfo ({len(narinfo)} bytes)", flush=True)
+                    else:
+                        print(f"  Got NOTFOUND response", flush=True)
+                except asyncio.TimeoutError:
+                    print(f"  TIMEOUT", flush=True)
+                except Exception as e:
+                    print(f"  ERROR: {e}", flush=True)
+        else:
+            print("\nNo peers discovered yet. Run this on another machine to test connectivity.", flush=True)
+
+        # Keep running to accept incoming connections
+        print("\nNode running. Press Ctrl+C to stop.", flush=True)
+        print("Other nodes can connect to:", flush=True)
+        print(f"  Node ID: {node_id}", flush=True)
+
+        # Run periodic tracker sync
+        while True:
+            await asyncio.sleep(ANNOUNCE_INTERVAL)
+            await node.sync_with_tracker()
+            print(f"[sync] Known peers: {len(node._known_peers)}", flush=True)
+
+    except KeyboardInterrupt:
+        print("\nStopping...", flush=True)
+    finally:
+        await node.stop()
+        print("Node stopped", flush=True)
+
+
 async def main():
     """Run all tests."""
     await test_single_node()
     await test_two_nodes()
 
 
+def cli():
+    """Command-line interface for testing Iroh connectivity."""
+    import argparse
+    import socket
+
+    parser = argparse.ArgumentParser(description="Iroh P2P test node")
+    parser.add_argument("--tracker", "-t", type=str, required=True,
+                        help="Tracker URL (e.g., http://tracker.example.com:12305)")
+    parser.add_argument("--peer-id", "-p", type=str, default=socket.gethostname(),
+                        help="Human-readable peer ID (default: hostname)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Enable verbose logging")
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    asyncio.run(test_tracker_connectivity(args.tracker, args.peer_id))
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        # Run internal tests
+        logging.basicConfig(level=logging.INFO)
+        asyncio.run(main())
+    else:
+        # Run CLI
+        cli()
