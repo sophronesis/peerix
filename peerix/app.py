@@ -648,7 +648,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                         <th></th>
                         <th>Dir</th>
                         <th>IP</th>
-                        <th>Latency</th>
+                        <th>In</th>
+                        <th>Out</th>
                     </tr>
                 </thead>
                 <tbody id="ipfs-peers-body">
@@ -876,6 +877,14 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                             const ipfsTbody = document.getElementById('ipfs-peers-body');
                             ipfsTbody.innerHTML = '';
 
+                            // Format bytes
+                            const formatBytes = (bytes) => {
+                                if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(1) + 'G';
+                                if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + 'M';
+                                if (bytes >= 1024) return (bytes / 1024).toFixed(1) + 'K';
+                                return bytes + 'B';
+                            };
+
                             // Show first 15 peers
                             for (const peer of ipfsPeers.slice(0, 15)) {
                                 const tr = document.createElement('tr');
@@ -901,11 +910,17 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                                 ipTd.textContent = peer.ip;
                                 tr.appendChild(ipTd);
 
-                                // Latency cell
-                                const latTd = document.createElement('td');
-                                latTd.textContent = peer.latency;
-                                latTd.style.color = '#888';
-                                tr.appendChild(latTd);
+                                // In bandwidth cell
+                                const inTd = document.createElement('td');
+                                inTd.textContent = formatBytes(peer.total_in || 0);
+                                inTd.style.color = '#00ff88';
+                                tr.appendChild(inTd);
+
+                                // Out bandwidth cell
+                                const outTd = document.createElement('td');
+                                outTd.textContent = formatBytes(peer.total_out || 0);
+                                outTd.style.color = '#00d9ff';
+                                tr.appendChild(outTd);
 
                                 ipfsTbody.appendChild(tr);
                             }
@@ -914,7 +929,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                             if (ipfsPeers.length > 15) {
                                 const tr = document.createElement('tr');
                                 const td = document.createElement('td');
-                                td.colSpan = 4;
+                                td.colSpan = 5;
                                 td.textContent = '... and ' + (ipfsPeers.length - 15) + ' more';
                                 td.style.color = '#666';
                                 td.style.textAlign = 'center';
@@ -1056,7 +1071,7 @@ async def tracker_peers(req: Request) -> Response:
 
 @app.route("/ipfs-peers")
 async def ipfs_peers(req: Request) -> Response:
-    """Get IPFS swarm peers with direction and latency."""
+    """Get IPFS swarm peers with direction, latency, and bandwidth."""
     if ipfs_access is None:
         return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
 
@@ -1110,6 +1125,33 @@ async def ipfs_peers(req: Request) -> Response:
                 except Exception:
                     pass
 
+            # Fetch per-peer bandwidth stats in parallel (limit to 20 peers)
+            peer_bw = {}
+            peer_ids_to_query = [p.get("Peer", "") for p in raw_peers[:20] if p.get("Peer")]
+
+            async def fetch_peer_bw(peer_id: str) -> None:
+                try:
+                    bw_resp = await client.post(
+                        f"{store.api_url}/stats/bw?peer={peer_id}",
+                        timeout=2.0,
+                    )
+                    if bw_resp.status_code == 200:
+                        bw_data = bw_resp.json()
+                        peer_bw[peer_id] = {
+                            "total_in": bw_data.get("TotalIn", 0),
+                            "total_out": bw_data.get("TotalOut", 0),
+                            "rate_in": bw_data.get("RateIn", 0),
+                            "rate_out": bw_data.get("RateOut", 0),
+                        }
+                except Exception:
+                    pass
+
+            # Run bandwidth queries in parallel
+            import trio
+            async with trio.open_nursery() as nursery:
+                for peer_id in peer_ids_to_query:
+                    nursery.start_soon(fetch_peer_bw, peer_id)
+
             for p in raw_peers:
                 addr = p.get("Addr", "")
                 peer_id = p.get("Peer", "")
@@ -1146,16 +1188,23 @@ async def ipfs_peers(req: Request) -> Response:
                 else:
                     dir_str = "?"
 
+                # Get bandwidth for this peer
+                bw = peer_bw.get(peer_id, {})
+
                 peers.append({
                     "ip": ip,
                     "peer_id": peer_id,
                     "latency": latency,
                     "direction": dir_str,
                     "country": _ip_country_cache.get(ip, ""),
+                    "total_in": bw.get("total_in", 0),
+                    "total_out": bw.get("total_out", 0),
+                    "rate_in": bw.get("rate_in", 0),
+                    "rate_out": bw.get("rate_out", 0),
                 })
 
-            # Sort by direction (inbound first), then by latency
-            peers.sort(key=lambda x: (0 if x["direction"] == "in" else 1, x["latency"]))
+            # Sort by total bandwidth (highest first)
+            peers.sort(key=lambda x: -(x["total_in"] + x["total_out"]))
 
             return JSONResponse({
                 "peers": peers,
