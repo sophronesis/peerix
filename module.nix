@@ -165,7 +165,7 @@ in
 
         lowBandwidth = lib.mkOption {
           type = types.bool;
-          default = false;
+          default = true;
           description = ''
             Enable low-bandwidth mode with conservative connection limits.
             Useful for networks where IPFS can overwhelm the connection.
