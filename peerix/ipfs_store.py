@@ -126,9 +126,9 @@ class IPFSStore(Store):
             "started_at": None,
         }
 
-        # Pause states
+        # Pause states (reannounce starts paused to avoid network flooding on startup)
         self._scan_paused: bool = False
-        self._reannounce_paused: bool = False
+        self._reannounce_paused: bool = True
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
@@ -1232,21 +1232,22 @@ class IPFSStore(Store):
 
     async def run_periodic_reannounce(
         self,
-        concurrency: int = 3,
-        batch_size: int = 100,
-        batch_delay: float = 5.0,
+        concurrency: int = 2,
+        batch_size: int = 10,
+        batch_delay: float = 30.0,
     ) -> None:
         """
         Run periodic DHT re-announcements to keep content discoverable.
 
         DHT provider records expire after ~24h. This task:
-        1. On startup: batch-announces all pending CIDs
-        2. Continuously: re-announces expiring CIDs spread evenly over 24h
+        1. Starts PAUSED by default to avoid network flooding
+        2. When resumed: batch-announces pending CIDs slowly
+        3. Continuously: re-announces expiring CIDs spread evenly over 24h
 
         Args:
-            concurrency: Max parallel announcements (default: 3)
-            batch_size: CIDs per batch on startup (default: 100)
-            batch_delay: Seconds between startup batches (default: 5)
+            concurrency: Max parallel announcements (default: 2)
+            batch_size: CIDs per batch (default: 10, very conservative)
+            batch_delay: Seconds between batches (default: 30)
         """
         import time
         logger.info(f"Starting periodic DHT re-announcement (concurrency={concurrency})")
