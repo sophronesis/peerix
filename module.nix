@@ -290,9 +290,20 @@ in
             type = types.nullOr types.int;
             default = null;
             description = ''
-              Maximum packets per second for IPFS traffic (both TCP and UDP).
-              At 1500 byte MTU, 1400 packets/sec ≈ 2 MiB/s.
-              null = no bandwidth limiting.
+              Maximum packets per second PER PEER for IPFS traffic.
+              This uses per-IP rate limiting - each peer gets this allowance.
+              null = no per-peer limiting.
+            '';
+          };
+
+          totalBandwidth = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = ''
+              Maximum TOTAL bandwidth in KiB/s for all IPFS traffic combined.
+              This is a hard cap on total throughput (in + out).
+              At 1500 byte MTU: 1024 KiB/s ≈ 700 packets/sec.
+              null = no total bandwidth limiting.
             '';
           };
 
@@ -530,6 +541,9 @@ in
         connBurst = toString (if rl.connectionBurst != null then rl.connectionBurst else rl.connectionRate);
         pktRate = toString rl.packetRate;
         maxConn = toString rl.maxConnections;
+        # Convert KiB/s to packets/sec (assuming 1500 byte MTU)
+        totalPktRate = toString (if rl.totalBandwidth != null then (rl.totalBandwidth * 1024 / 1500) else 0);
+        totalBurst = toString (if rl.totalBandwidth != null then (rl.totalBandwidth * 1024 / 1500 * 2) else 0);
 
         connRateRules = lib.optionalString (rl.connectionRate != null) ''
           # Limit NEW outgoing connections
@@ -556,6 +570,22 @@ in
           iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
         '';
 
+        # Total bandwidth limit (global, not per-IP)
+        totalBwRules = lib.optionalString (rl.totalBandwidth != null) ''
+          # Total outgoing IPFS bandwidth limit
+          iptables -A OUTPUT -p tcp --sport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT
+          iptables -A OUTPUT -p tcp --sport 4001 -j DROP
+          # Total incoming IPFS bandwidth limit
+          iptables -A INPUT -p tcp --dport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT
+          iptables -A INPUT -p tcp --dport 4001 -j DROP
+        '';
+        cleanupTotalBwRules = lib.optionalString (rl.totalBandwidth != null) ''
+          iptables -D OUTPUT -p tcp --sport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT 2>/dev/null || true
+          iptables -D OUTPUT -p tcp --sport 4001 -j DROP 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -j DROP 2>/dev/null || true
+        '';
+
         connlimitRules = lib.optionalString (rl.maxConnections != null) ''
           # Limit concurrent outgoing connections
           iptables -A OUTPUT -p tcp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP
@@ -569,10 +599,12 @@ in
         # Clean up existing IPFS rate limit rules (peerix)
         ${cleanupConnRateRules}
         ${cleanupBandwidthRules}
+        ${cleanupTotalBwRules}
         ${cleanupConnlimitRules}
 
         ${connRateRules}
         ${bandwidthRules}
+        ${totalBwRules}
         ${connlimitRules}
       '';
 
@@ -582,6 +614,8 @@ in
         connBurst = toString (if rl.connectionBurst != null then rl.connectionBurst else rl.connectionRate);
         pktRate = toString rl.packetRate;
         maxConn = toString rl.maxConnections;
+        totalPktRate = toString (if rl.totalBandwidth != null then (rl.totalBandwidth * 1024 / 1500) else 0);
+        totalBurst = toString (if rl.totalBandwidth != null then (rl.totalBandwidth * 1024 / 1500 * 2) else 0);
 
         connRateCleanup = lib.optionalString (rl.connectionRate != null) ''
           iptables -D OUTPUT -p tcp --dport 4001 --syn -m limit --limit ${connRate}/sec --limit-burst ${connBurst} -j ACCEPT 2>/dev/null || true
@@ -593,6 +627,12 @@ in
           iptables -D INPUT -p tcp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in -j DROP 2>/dev/null || true
           iptables -D INPUT -p udp --dport 4001 -m hashlimit --hashlimit-above ${pktRate}/sec --hashlimit-mode dstip --hashlimit-name ipfs_in_udp -j DROP 2>/dev/null || true
         '';
+        totalBwCleanup = lib.optionalString (rl.totalBandwidth != null) ''
+          iptables -D OUTPUT -p tcp --sport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT 2>/dev/null || true
+          iptables -D OUTPUT -p tcp --sport 4001 -j DROP 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -m limit --limit ${totalPktRate}/sec --limit-burst ${totalBurst} -j ACCEPT 2>/dev/null || true
+          iptables -D INPUT -p tcp --dport 4001 -j DROP 2>/dev/null || true
+        '';
         connlimitCleanup = lib.optionalString (rl.maxConnections != null) ''
           iptables -D OUTPUT -p tcp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
           iptables -D OUTPUT -p udp --dport 4001 -m connlimit --connlimit-above ${maxConn} -j DROP 2>/dev/null || true
@@ -601,6 +641,7 @@ in
         # Clean up IPFS rate limit rules on firewall stop (peerix)
         ${connRateCleanup}
         ${bandwidthCleanup}
+        ${totalBwCleanup}
         ${connlimitCleanup}
       '';
     })
