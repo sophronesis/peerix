@@ -177,6 +177,66 @@ in
           '';
         };
 
+        enableQUIC = lib.mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Enable QUIC transport (UDP-based).
+            Disable if your ISP throttles UDP traffic.
+          '';
+        };
+
+        connMgr = {
+          lowWater = lib.mkOption {
+            type = types.int;
+            default = 600;
+            description = "Start pruning connections when above this number. IPFS default: 600.";
+          };
+          highWater = lib.mkOption {
+            type = types.int;
+            default = 900;
+            description = "Hard connection limit. IPFS default: 900.";
+          };
+          gracePeriod = lib.mkOption {
+            type = types.str;
+            default = "20s";
+            description = "Grace period before pruning new connections. IPFS default: 20s.";
+          };
+        };
+
+        resourceMgr = {
+          enabled = lib.mkOption {
+            type = types.bool;
+            default = true;
+            description = "Enable libp2p Resource Manager.";
+          };
+          connsInbound = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = "Max inbound connections. null = auto-scaled. Must be > connMgr.highWater.";
+          };
+          connsOutbound = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = "Max outbound connections. null = auto-scaled.";
+          };
+          streamsInbound = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = "Max inbound streams. null = auto-scaled.";
+          };
+          streamsOutbound = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = "Max outbound streams. null = auto-scaled.";
+          };
+          memory = lib.mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = "Max memory in bytes. null = auto-scaled.";
+          };
+        };
+
         rateLimit = {
           enable = lib.mkOption {
             type = types.bool;
@@ -389,35 +449,41 @@ in
           Addresses.API = "/ip4/127.0.0.1/tcp/5001";
           # CORS headers for API access
           API.HTTPHeaders."Access-Control-Allow-Origin" = [ "*" ];
-          # Connection manager - limit connections to prevent network saturation
-          # Note: must be <= ResourceMgr limits
+          # Connection manager
           Swarm.ConnMgr = {
             Type = "basic";
-            LowWater = 3;    # Start pruning at this many connections
-            HighWater = 5;   # Hard limit (must be <= ResourceMgr.ConnsInbound)
-            GracePeriod = "30s";
+            LowWater = cfg.ipfs.connMgr.lowWater;
+            HighWater = cfg.ipfs.connMgr.highWater;
+            GracePeriod = cfg.ipfs.connMgr.gracePeriod;
           };
-          # Resource Manager - enable it (limits are in separate file for Kubo 0.19+)
-          Swarm.ResourceMgr.Enabled = true;
-          # Disable QUIC to reduce UDP flood (Telekom handles TCP better)
-          Swarm.Transports.Network.QUIC = false;
+          # Resource Manager
+          Swarm.ResourceMgr.Enabled = cfg.ipfs.resourceMgr.enabled;
+          # QUIC transport
+          Swarm.Transports.Network.QUIC = cfg.ipfs.enableQUIC;
         };
       };
 
       # Ensure peerix starts after kubo
       systemd.services.peerix.after = [ "ipfs.service" ];
       systemd.services.peerix.wants = [ "ipfs.service" ];
+    })
 
-      # Resource Manager limits file (Kubo 0.19+ uses separate file instead of config)
-      # Note: ConnsInbound must be > ConnMgr.HighWater
+    # Resource Manager limits file (only if any limit is explicitly set)
+    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.configureKubo && (
+      cfg.ipfs.resourceMgr.connsInbound != null ||
+      cfg.ipfs.resourceMgr.connsOutbound != null ||
+      cfg.ipfs.resourceMgr.streamsInbound != null ||
+      cfg.ipfs.resourceMgr.streamsOutbound != null ||
+      cfg.ipfs.resourceMgr.memory != null
+    )) {
       environment.etc."ipfs-resource-limits.json" = {
         text = builtins.toJSON {
-          System = {
-            ConnsInbound = 10;
-            ConnsOutbound = 10;
-            StreamsInbound = 20;
-            StreamsOutbound = 20;
-            Memory = 536870912;  # 512MB
+          System = lib.filterAttrs (n: v: v != null) {
+            ConnsInbound = cfg.ipfs.resourceMgr.connsInbound;
+            ConnsOutbound = cfg.ipfs.resourceMgr.connsOutbound;
+            StreamsInbound = cfg.ipfs.resourceMgr.streamsInbound;
+            StreamsOutbound = cfg.ipfs.resourceMgr.streamsOutbound;
+            Memory = cfg.ipfs.resourceMgr.memory;
           };
         };
         mode = "0644";
