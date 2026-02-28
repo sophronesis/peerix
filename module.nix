@@ -163,6 +163,17 @@ in
           '';
         };
 
+        lowBandwidth = lib.mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Enable low-bandwidth mode with conservative connection limits.
+            Useful for networks where IPFS can overwhelm the connection.
+            Sets: QUIC disabled, connMgr 2/5, resourceMgr 7/7,
+            streams 10/10, rate limit 3 MiB/s. Individual settings can override.
+          '';
+        };
+
         routingType = lib.mkOption {
           type = types.enum [ "dhtclient" "dht" "dhtserver" "none" "autoclient" ];
           default = "dhtclient";
@@ -351,6 +362,21 @@ in
   };
 
   config = lib.mkMerge [
+    # Low-bandwidth mode defaults
+    (lib.mkIf (cfg.enable && cfg.ipfs.lowBandwidth) {
+      services.peerix.ipfs = {
+        enableQUIC = lib.mkDefault false;
+        connMgr.lowWater = lib.mkDefault 2;
+        connMgr.highWater = lib.mkDefault 5;
+        resourceMgr.connsInbound = lib.mkDefault 7;
+        resourceMgr.connsOutbound = lib.mkDefault 7;
+        resourceMgr.streamsInbound = lib.mkDefault 10;
+        resourceMgr.streamsOutbound = lib.mkDefault 10;
+        rateLimit.enable = lib.mkDefault true;
+        rateLimit.totalBandwidth = lib.mkDefault 3072;
+      };
+    })
+
     (lib.mkIf (cfg.enable) {
       systemd.services.peerix = {
         enable = true;
