@@ -427,10 +427,10 @@ class IPFSStore(Store):
         progress["fresh_announced"] = fresh_announced
         progress["paused"] = self._reannounce_paused
 
-        # ETA for re-announce (based on pending count and rate of ~1 per 3s)
+        # ETA for re-announce (based on pending count and rate of ~1 per 10s)
         if pending > 0 and not self._reannounce_paused:
-            # Rate is approximately 1 CID per 3 seconds
-            progress["reannounce_eta_seconds"] = pending * 3
+            # Rate is approximately 1 CID per 10 seconds
+            progress["reannounce_eta_seconds"] = pending * 10
         else:
             progress["reannounce_eta_seconds"] = None
 
