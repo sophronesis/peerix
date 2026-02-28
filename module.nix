@@ -140,6 +140,36 @@ in
         '';
       };
 
+      # Homeostasis options (automatic IPFS peer management)
+      homeostasis = {
+        enable = lib.mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Enable homeostasis daemon for automatic IPFS peer management.
+            Monitors network latency and disconnects peers to prevent flooding.
+          '';
+        };
+
+        minPeers = lib.mkOption {
+          type = types.int;
+          default = 2;
+          description = ''
+            Minimum number of IPFS peers to maintain.
+            The daemon will not disconnect below this threshold.
+          '';
+        };
+
+        maxPeers = lib.mkOption {
+          type = types.int;
+          default = 5;
+          description = ''
+            Maximum number of IPFS peers allowed.
+            Excess peers will be disconnected.
+          '';
+        };
+      };
+
       # IPFS module options
       ipfs = {
         enable = lib.mkOption {
@@ -438,6 +468,8 @@ in
           concurrencyArgs = "--ipfs-concurrency ${toString cfg.ipfsConcurrency}";
           priorityArgs = "--priority ${toString cfg.priority}";
           filterModeArgs = "--filter-mode ${cfg.filterMode}";
+          homeostasisArgs = lib.optionalString cfg.homeostasis.enable
+            "--homeostasis --homeostasis-min-peers ${toString cfg.homeostasis.minPeers} --homeostasis-max-peers ${toString cfg.homeostasis.maxPeers}";
         in ''
           export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
           exec ${cfg.package}/bin/peerix \
@@ -446,7 +478,8 @@ in
             ${scanIntervalArgs} \
             ${concurrencyArgs} \
             ${priorityArgs} \
-            ${filterModeArgs}
+            ${filterModeArgs} \
+            ${homeostasisArgs}
         '';
       };
 

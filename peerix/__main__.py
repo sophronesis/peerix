@@ -98,6 +98,12 @@ serve_parser.add_argument("--priority", type=int, default=5,
                     help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
 serve_parser.add_argument("--filter-mode", choices=["nixpkgs", "rules"], default="nixpkgs",
                     help="Package filter mode: nixpkgs (only serve packages in cache.nixos.org, default) or rules (heuristic patterns)")
+serve_parser.add_argument("--homeostasis", action="store_true", default=False,
+                    help="Enable homeostasis daemon for automatic IPFS peer management")
+serve_parser.add_argument("--homeostasis-min-peers", type=int, default=2,
+                    help="Minimum IPFS peers to maintain (default: 2)")
+serve_parser.add_argument("--homeostasis-max-peers", type=int, default=5,
+                    help="Maximum IPFS peers allowed (default: 5)")
 
 # Status command
 status_parser = subparsers.add_parser("status", help="Show current scan progress")
@@ -120,6 +126,12 @@ parser.add_argument("--priority", type=int, default=5,
                     help="Cache priority (lower = higher priority, default: 5, cache.nixos.org is 10)")
 parser.add_argument("--filter-mode", choices=["nixpkgs", "rules"], default="nixpkgs",
                     help="Package filter mode: nixpkgs (only serve packages in cache.nixos.org, default) or rules (heuristic patterns)")
+parser.add_argument("--homeostasis", action="store_true", default=False,
+                    help="Enable homeostasis daemon for automatic IPFS peer management")
+parser.add_argument("--homeostasis-min-peers", type=int, default=2,
+                    help="Minimum IPFS peers to maintain (default: 2)")
+parser.add_argument("--homeostasis-max-peers", type=int, default=5,
+                    help="Maximum IPFS peers allowed (default: 5)")
 
 
 def run():
@@ -180,6 +192,9 @@ async def main(args):
         ipfs_concurrency=args.ipfs_concurrency,
         priority=args.priority,
         filter_mode=args.filter_mode,
+        homeostasis_enabled=args.homeostasis,
+        homeostasis_min_peers=args.homeostasis_min_peers,
+        homeostasis_max_peers=args.homeostasis_max_peers,
     ):
         async with trio.open_nursery() as nursery:
             # Start memory monitor (logs every 10 min)

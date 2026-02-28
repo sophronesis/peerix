@@ -15,6 +15,7 @@ from peerix.filtered import FilteredStore, NixpkgsFilteredStore
 from peerix.verified import VerifiedStore
 from peerix.tracker_client import TrackerClient
 from peerix.store_scanner import scan_store_paths
+from peerix.homeostasis import HomeostasisDaemon, HomeostasisConfig
 
 
 logger = logging.getLogger("peerix.app")
@@ -24,6 +25,7 @@ l_access = None
 r_access = None
 ipfs_access = None  # IPFS store access
 cache_priority = 5  # Default cache priority (lower = higher priority)
+homeostasis_daemon = None  # Homeostasis daemon for network management
 
 
 @contextlib.asynccontextmanager
@@ -44,6 +46,10 @@ async def setup_stores(
     ipfs_concurrency: int = 10,
     # Cache options
     priority: int = 5,
+    # Homeostasis options
+    homeostasis_enabled: bool = False,
+    homeostasis_min_peers: int = 2,
+    homeostasis_max_peers: int = 5,
 ):
     global l_access, r_access, ipfs_access, cache_priority
     cache_priority = priority
@@ -60,6 +66,7 @@ async def setup_stores(
 
         elif mode == "ipfs":
             # IPFS mode - uses IPFS for P2P NAR distribution
+            global homeostasis_daemon
             r_access = None
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
@@ -92,9 +99,21 @@ async def setup_stores(
                         1,    # batch_size (1 CID at a time)
                         10.0, # batch_delay (10s between announcements)
                     )
+                    # Start homeostasis daemon if enabled
+                    if homeostasis_enabled:
+                        config = HomeostasisConfig(
+                            min_peers=homeostasis_min_peers,
+                            max_peers=homeostasis_max_peers,
+                        )
+                        homeostasis_daemon = HomeostasisDaemon(config)
+                        nursery.start_soon(homeostasis_daemon.start)
+                        logger.info(f"Homeostasis enabled: {homeostasis_min_peers}-{homeostasis_max_peers} peers")
                     yield
                     nursery.cancel_scope.cancel()
             finally:
+                if homeostasis_daemon:
+                    await homeostasis_daemon.stop()
+                    homeostasis_daemon = None
                 await _cleanup_ipfs(ipfs_info)
                 ipfs_access = None
 
@@ -307,6 +326,17 @@ async def announce_status(req: Request) -> Response:
 
     progress = ipfs_access["store"].get_announce_progress()
     return JSONResponse(progress)
+
+
+@app.route("/homeostasis-status")
+async def homeostasis_status(req: Request) -> Response:
+    """Get current homeostasis daemon status."""
+    if homeostasis_daemon is None:
+        return JSONResponse({"enabled": False}, status_code=200)
+
+    status = homeostasis_daemon.get_status()
+    status["enabled"] = True
+    return JSONResponse(status)
 
 
 @app.route("/scan/pause", methods=["POST"])
@@ -694,6 +724,29 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-value" id="ipfs-rate-out">--</span>
             </div>
         </div>
+        <div class="card" id="homeostasis-card" style="display: none;">
+            <h2>Homeostasis</h2>
+            <div class="status-row">
+                <span class="status-label">Status</span>
+                <span class="status-value" id="homeo-status">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Latency</span>
+                <span class="status-value" id="homeo-latency">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Packet Loss</span>
+                <span class="status-value" id="homeo-loss">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Peers</span>
+                <span class="status-value" id="homeo-peers">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Target</span>
+                <span class="status-value" id="homeo-target">--</span>
+            </div>
+        </div>
         <div class="card" id="tracker-card" style="display: none;">
             <h2>Tracker Peers</h2>
             <table class="peers-table">
@@ -767,10 +820,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function update() {
             try {
-                const [scanResp, statsResp, announceResp] = await Promise.all([
+                const [scanResp, statsResp, announceResp, homeoResp] = await Promise.all([
                     fetch('/scan-status'),
                     fetch('/dashboard-stats'),
-                    fetch('/announce-status')
+                    fetch('/announce-status'),
+                    fetch('/homeostasis-status')
                 ]);
 
                 if (!scanResp.ok || !statsResp.ok || !announceResp.ok) {
@@ -780,6 +834,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 const scan = await scanResp.json();
                 const stats = await statsResp.json();
                 const announce = await announceResp.json();
+                const homeo = homeoResp.ok ? await homeoResp.json() : { enabled: false };
 
                 // Auto-reload on version change
                 if (stats.dashboard_version) {
@@ -946,6 +1001,41 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     };
                     document.getElementById('ipfs-rate-in').textContent = formatRate(stats.ipfs_bandwidth.rate_in);
                     document.getElementById('ipfs-rate-out').textContent = formatRate(stats.ipfs_bandwidth.rate_out);
+                }
+
+                // Homeostasis status
+                const homeoCard = document.getElementById('homeostasis-card');
+                if (homeo.enabled) {
+                    homeoCard.style.display = 'block';
+
+                    const statusEl = document.getElementById('homeo-status');
+                    if (homeo.consecutive_unhealthy > 0) {
+                        statusEl.textContent = 'Unhealthy (' + homeo.consecutive_unhealthy + ')';
+                        statusEl.style.color = '#ff6b6b';
+                    } else {
+                        statusEl.textContent = 'Healthy';
+                        statusEl.style.color = '#4cd964';
+                    }
+
+                    const latencyEl = document.getElementById('homeo-latency');
+                    latencyEl.textContent = homeo.latency_ms.toFixed(1) + ' ms';
+                    if (homeo.latency_ms > 100) {
+                        latencyEl.style.color = '#ff6b6b';
+                    } else if (homeo.latency_ms > 50) {
+                        latencyEl.style.color = '#ff9500';
+                    } else {
+                        latencyEl.style.color = '#4cd964';
+                    }
+
+                    const lossEl = document.getElementById('homeo-loss');
+                    lossEl.textContent = homeo.packet_loss.toFixed(0) + '%';
+                    lossEl.style.color = homeo.packet_loss > 5 ? '#ff6b6b' : '#4cd964';
+
+                    document.getElementById('homeo-peers').textContent = homeo.peer_count;
+                    document.getElementById('homeo-target').textContent =
+                        homeo.config.min_peers + '-' + homeo.config.max_peers;
+                } else {
+                    homeoCard.style.display = 'none';
                 }
 
                 // Tracker URL
