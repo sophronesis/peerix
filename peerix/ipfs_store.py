@@ -879,6 +879,8 @@ class IPFSStore(Store):
         self,
         extra_patterns: t.List[str] = None,
         concurrency: int = 10,
+        dht_concurrency: int = 3,
+        announce_to_dht: bool = True,
     ) -> t.Tuple[int, int]:
         """
         Scan local nix store and publish applicable packages to IPFS.
@@ -887,16 +889,19 @@ class IPFSStore(Store):
         Before publishing, checks tracker for existing CIDs to avoid
         re-uploading content that's already in the network.
         Uploads are parallelized with configurable concurrency.
+        DHT announcements run in parallel with scanning.
 
         Args:
             extra_patterns: Additional fnmatch patterns to exclude
             concurrency: Maximum number of parallel IPFS uploads (default: 10)
+            dht_concurrency: Maximum parallel DHT announcements (default: 3)
+            announce_to_dht: Whether to announce CIDs to DHT in parallel (default: True)
 
         Returns:
             Tuple of (published_count, skipped_count)
         """
         import time
-        logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency})...")
+        logger.info(f"Scanning nix store for IPFS publishing (concurrency={concurrency}, dht_concurrency={dht_concurrency})...")
 
         # Fetch existing CIDs from tracker to avoid re-publishing
         tracker_cids: t.Dict[str, str] = {}
@@ -936,6 +941,10 @@ class IPFSStore(Store):
         # Counters (safe since trio is single-threaded)
         counters = {"published": 0, "skipped": 0, "already_cached": 0, "from_tracker": 0}
         semaphore = trio.Semaphore(concurrency)
+
+        # DHT announcement channel - CIDs are sent here for parallel announcement
+        dht_send_channel, dht_recv_channel = trio.open_memory_channel(1000)
+        dht_semaphore = trio.Semaphore(dht_concurrency)
 
         async def publish_one(hsh: str) -> None:
             """Publish a single store path to IPFS."""
@@ -997,6 +1006,12 @@ class IPFSStore(Store):
                         self._scan_progress["from_tracker"] = counters["from_tracker"]
                         self._scan_progress["processed"] += 1
                         logger.debug(f"Using tracker CID for {hsh}: {cid}")
+                        # Queue for DHT announcement (parallel with scan)
+                        if announce_to_dht and cid not in self._announced_cache:
+                            try:
+                                dht_send_channel.send_nowait(cid)
+                            except trio.WouldBlock:
+                                pass  # Channel full, skip this one
                         return
 
                     # Not on tracker - publish to IPFS
@@ -1011,6 +1026,12 @@ class IPFSStore(Store):
                                 await self.tracker_client.register_cid(hsh, cid)
                             except Exception as e:
                                 logger.debug(f"Failed to register CID: {e}")
+                        # Queue for DHT announcement (parallel with scan)
+                        if announce_to_dht and cid not in self._announced_cache:
+                            try:
+                                dht_send_channel.send_nowait(cid)
+                            except trio.WouldBlock:
+                                pass  # Channel full, skip this one
                     else:
                         self._skipped_cache.add(hsh)
                         self._skipped_dirty = True
@@ -1043,15 +1064,40 @@ class IPFSStore(Store):
                 if self._skipped_dirty:
                     self._save_skipped_cache()
                     logger.debug("Periodic save: skipped cache")
+                if self._announced_dirty:
+                    self._save_announced_cache()
+                    logger.debug("Periodic save: announced cache")
+
+        async def dht_announcer() -> None:
+            """Background task that announces CIDs to DHT in parallel with scanning."""
+            announced_count = 0
+            failed_count = 0
+            async with dht_recv_channel:
+                async for cid in dht_recv_channel:
+                    async with dht_semaphore:
+                        try:
+                            success = await self.announce_to_dht(cid)
+                            if success:
+                                announced_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as e:
+                            logger.debug(f"DHT announce error: {e}")
+                            failed_count += 1
+            logger.info(f"DHT announcer finished: {announced_count} announced, {failed_count} failed")
 
         async def run_scan_work() -> None:
-            async with trio.open_nursery() as work_nursery:
-                for hsh in store_hashes:
-                    work_nursery.start_soon(publish_one, hsh)
+            async with dht_send_channel:
+                async with trio.open_nursery() as work_nursery:
+                    for hsh in store_hashes:
+                        work_nursery.start_soon(publish_one, hsh)
+            # Channel closes when scan work completes, signaling announcer to finish
 
-        # Run work and periodic save in parallel
+        # Run work, DHT announcer, and periodic save in parallel
         async with trio.open_nursery() as nursery:
             nursery.start_soon(periodic_save)
+            if announce_to_dht:
+                nursery.start_soon(dht_announcer)
             await run_scan_work()
             scan_done_event.set()  # Signal periodic_save to exit
 
@@ -1060,6 +1106,8 @@ class IPFSStore(Store):
             self._save_cache()
         if self._skipped_dirty:
             self._save_skipped_cache()
+        if self._announced_dirty:
+            self._save_announced_cache()
 
         # Mark scan as complete
         self._scan_progress["active"] = False
