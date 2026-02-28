@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 from peerix.local import local
 from peerix.remote import remote
 from peerix.prefix import PrefixStore
-from peerix.filtered import FilteredStore
+from peerix.filtered import FilteredStore, NixpkgsFilteredStore
 from peerix.verified import VerifiedStore
 from peerix.tracker_client import TrackerClient
 from peerix.store_scanner import scan_store_paths
@@ -35,6 +35,7 @@ async def setup_stores(
     no_verify: bool = False,
     upstream_cache: str = "https://cache.nixos.org",
     no_filter: bool = False,
+    filter_mode: str = "nixpkgs",  # "nixpkgs" or "rules"
     filter_patterns: list = None,
     no_default_filters: bool = False,
     peer_id: str = None,
@@ -62,7 +63,7 @@ async def setup_stores(
             r_access = None
             ipfs_info = await _setup_ipfs(
                 l, local_port, tracker_url, no_verify, upstream_cache,
-                no_filter, filter_patterns, no_default_filters, peer_id,
+                no_filter, filter_mode, filter_patterns, no_default_filters, peer_id,
                 scan_interval, ipfs_concurrency,
             )
             ipfs_access = ipfs_info
@@ -123,7 +124,7 @@ async def _run_periodic_delta_sync(tracker_client: TrackerClient, interval: floa
 
 
 async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_cache,
-                      no_filter, filter_patterns, no_default_filters, peer_id,
+                      no_filter, filter_mode, filter_patterns, no_default_filters, peer_id,
                       scan_interval=3600, ipfs_concurrency=10):
     """Setup IPFS-based NAR sharing with tracker integration."""
     from peerix.ipfs_store import IPFSStore
@@ -134,15 +135,22 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
     # Build the serving chain: local → verified → filtered
     serving_store = local_store
     verified_store = None
+    nixpkgs_filter = None
     if not no_verify:
         verified_store = VerifiedStore(serving_store, upstream_cache)
         serving_store = verified_store
     if not no_filter:
-        serving_store = FilteredStore(
-            serving_store,
-            extra_patterns=filter_patterns or [],
-            use_defaults=not no_default_filters,
-        )
+        if filter_mode == "nixpkgs":
+            nixpkgs_filter = NixpkgsFilteredStore(serving_store, cache_url=upstream_cache)
+            serving_store = nixpkgs_filter
+            logger.info("Using nixpkgs filter (only serving packages in cache.nixos.org)")
+        else:  # "rules"
+            serving_store = FilteredStore(
+                serving_store,
+                extra_patterns=filter_patterns or [],
+                use_defaults=not no_default_filters,
+            )
+            logger.info("Using rules-based filter")
 
     # Create tracker client for package lookups
     tracker_client = None
@@ -165,6 +173,7 @@ async def _setup_ipfs(local_store, local_port, tracker_url, no_verify, upstream_
         "access": ipfs_prefix,
         "store": ipfs_store,
         "verified_store": verified_store,
+        "nixpkgs_filter": nixpkgs_filter,
         "serving_store": serving_store,
         "tracker_client": tracker_client,
         "concurrency": ipfs_concurrency,
@@ -183,6 +192,10 @@ async def _cleanup_ipfs(ipfs_info):
     vs = ipfs_info.get("verified_store")
     if vs is not None:
         await vs.close()
+
+    nf = ipfs_info.get("nixpkgs_filter")
+    if nf is not None:
+        await nf.close()
 
     tracker_client = ipfs_info.get("tracker_client")
     if tracker_client is not None:

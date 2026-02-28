@@ -97,6 +97,16 @@ in
         '';
       };
 
+      filterMode = lib.mkOption {
+        type = types.enum [ "nixpkgs" "rules" ];
+        default = "nixpkgs";
+        description = ''
+          Package filter mode:
+          - nixpkgs: Only serve packages that exist in cache.nixos.org (default)
+          - rules: Use heuristic pattern rules to filter system-specific packages
+        '';
+      };
+
       # IPFS scan options
       scanInterval = lib.mkOption {
         type = types.int;
@@ -380,6 +390,7 @@ in
           scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
           concurrencyArgs = "--ipfs-concurrency ${toString cfg.ipfsConcurrency}";
           priorityArgs = "--priority ${toString cfg.priority}";
+          filterModeArgs = "--filter-mode ${cfg.filterMode}";
         in ''
           export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
           exec ${cfg.package}/bin/peerix \
@@ -387,7 +398,8 @@ in
             ${trackerArgs} \
             ${scanIntervalArgs} \
             ${concurrencyArgs} \
-            ${priorityArgs}
+            ${priorityArgs} \
+            ${filterModeArgs}
         '';
       };
 
