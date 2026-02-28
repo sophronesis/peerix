@@ -632,6 +632,29 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 </tbody>
             </table>
         </div>
+        <div class="card" id="ipfs-peers-card" style="display: none;">
+            <h2>IPFS Swarm Peers</h2>
+            <div class="status-row" style="margin-bottom: 8px;">
+                <span class="status-label">Inbound</span>
+                <span class="status-value" id="ipfs-inbound-count" style="color: #00ff88;">--</span>
+            </div>
+            <div class="status-row" style="margin-bottom: 12px;">
+                <span class="status-label">Outbound</span>
+                <span class="status-value" id="ipfs-outbound-count" style="color: #00d9ff;">--</span>
+            </div>
+            <table class="peers-table">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>Dir</th>
+                        <th>IP</th>
+                        <th>Latency</th>
+                    </tr>
+                </thead>
+                <tbody id="ipfs-peers-body">
+                </tbody>
+            </table>
+        </div>
     </div>
     <script>
         // Country code to flag emoji
@@ -835,6 +858,77 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     trackerCard.style.display = 'none';
                 }
 
+                // Fetch IPFS swarm peers
+                const ipfsPeersCard = document.getElementById('ipfs-peers-card');
+                try {
+                    const ipfsPeersResp = await fetch('/ipfs-peers');
+                    if (ipfsPeersResp.ok) {
+                        const ipfsPeersData = await ipfsPeersResp.json();
+                        const ipfsPeers = ipfsPeersData.peers || [];
+
+                        if (ipfsPeers.length > 0) {
+                            ipfsPeersCard.style.display = 'block';
+
+                            // Update counts
+                            document.getElementById('ipfs-inbound-count').textContent = ipfsPeersData.inbound || 0;
+                            document.getElementById('ipfs-outbound-count').textContent = ipfsPeersData.outbound || 0;
+
+                            const ipfsTbody = document.getElementById('ipfs-peers-body');
+                            ipfsTbody.innerHTML = '';
+
+                            // Show first 15 peers
+                            for (const peer of ipfsPeers.slice(0, 15)) {
+                                const tr = document.createElement('tr');
+
+                                // Flag cell
+                                const flagTd = document.createElement('td');
+                                flagTd.textContent = countryToFlag(peer.country || '');
+                                tr.appendChild(flagTd);
+
+                                // Direction cell
+                                const dirTd = document.createElement('td');
+                                if (peer.direction === 'in') {
+                                    dirTd.innerHTML = '<span style="color:#00ff88">↓</span>';
+                                    dirTd.title = 'Inbound';
+                                } else {
+                                    dirTd.innerHTML = '<span style="color:#00d9ff">↑</span>';
+                                    dirTd.title = 'Outbound';
+                                }
+                                tr.appendChild(dirTd);
+
+                                // IP cell
+                                const ipTd = document.createElement('td');
+                                ipTd.textContent = peer.ip;
+                                tr.appendChild(ipTd);
+
+                                // Latency cell
+                                const latTd = document.createElement('td');
+                                latTd.textContent = peer.latency;
+                                latTd.style.color = '#888';
+                                tr.appendChild(latTd);
+
+                                ipfsTbody.appendChild(tr);
+                            }
+
+                            // Show "more" indicator if truncated
+                            if (ipfsPeers.length > 15) {
+                                const tr = document.createElement('tr');
+                                const td = document.createElement('td');
+                                td.colSpan = 4;
+                                td.textContent = '... and ' + (ipfsPeers.length - 15) + ' more';
+                                td.style.color = '#666';
+                                td.style.textAlign = 'center';
+                                tr.appendChild(td);
+                                ipfsTbody.appendChild(tr);
+                            }
+                        } else {
+                            ipfsPeersCard.style.display = 'none';
+                        }
+                    }
+                } catch (e) {
+                    ipfsPeersCard.style.display = 'none';
+                }
+
             } catch (e) {
                 document.getElementById('error').textContent = 'Error: ' + e.message;
                 document.getElementById('error').style.display = 'block';
@@ -958,6 +1052,120 @@ async def tracker_peers(req: Request) -> Response:
         pass
 
     return JSONResponse({"peers": []})
+
+
+@app.route("/ipfs-peers")
+async def ipfs_peers(req: Request) -> Response:
+    """Get IPFS swarm peers with direction and latency."""
+    if ipfs_access is None:
+        return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
+
+    store = ipfs_access.get("store")
+    if store is None:
+        return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
+
+    try:
+        client = await store._get_client()
+        resp = await client.post(
+            f"{store.api_url}/swarm/peers?direction=true&latency=true",
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw_peers = data.get("Peers") or []
+
+            # Parse and format peers
+            peers = []
+            inbound_count = 0
+            outbound_count = 0
+
+            # Get unique IPs that need lookup
+            ips_to_lookup = []
+            for p in raw_peers:
+                addr = p.get("Addr", "")
+                # Extract IP from multiaddr like /ip4/1.2.3.4/tcp/4001
+                parts = addr.split("/")
+                ip = ""
+                for i, part in enumerate(parts):
+                    if part in ("ip4", "ip6") and i + 1 < len(parts):
+                        ip = parts[i + 1]
+                        break
+
+                if ip and ip not in _ip_country_cache:
+                    ips_to_lookup.append(ip)
+
+            # Batch lookup country codes
+            if ips_to_lookup:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=5.0) as geo_client:
+                        geo_resp = await geo_client.post(
+                            "http://ip-api.com/batch?fields=query,countryCode",
+                            json=[{"query": ip} for ip in ips_to_lookup[:100]],
+                            timeout=5.0,
+                        )
+                        if geo_resp.status_code == 200:
+                            for item in geo_resp.json():
+                                _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
+                except Exception:
+                    pass
+
+            for p in raw_peers:
+                addr = p.get("Addr", "")
+                peer_id = p.get("Peer", "")
+                latency = p.get("Latency", "n/a")
+                direction = p.get("Direction", 0)  # 1=inbound, 2=outbound
+
+                # Extract IP from multiaddr
+                parts = addr.split("/")
+                ip = ""
+                for i, part in enumerate(parts):
+                    if part in ("ip4", "ip6") and i + 1 < len(parts):
+                        ip = parts[i + 1]
+                        break
+
+                # Format latency
+                if latency and latency != "n/a":
+                    # Convert from "2.470056507s" to "2.5s"
+                    if latency.endswith("ms"):
+                        lat_val = float(latency[:-2])
+                        latency = f"{lat_val:.0f}ms"
+                    elif latency.endswith("s"):
+                        lat_val = float(latency[:-1])
+                        if lat_val < 1:
+                            latency = f"{lat_val*1000:.0f}ms"
+                        else:
+                            latency = f"{lat_val:.1f}s"
+
+                if direction == 1:
+                    inbound_count += 1
+                    dir_str = "in"
+                elif direction == 2:
+                    outbound_count += 1
+                    dir_str = "out"
+                else:
+                    dir_str = "?"
+
+                peers.append({
+                    "ip": ip,
+                    "peer_id": peer_id,
+                    "latency": latency,
+                    "direction": dir_str,
+                    "country": _ip_country_cache.get(ip, ""),
+                })
+
+            # Sort by direction (inbound first), then by latency
+            peers.sort(key=lambda x: (0 if x["direction"] == "in" else 1, x["latency"]))
+
+            return JSONResponse({
+                "peers": peers,
+                "inbound": inbound_count,
+                "outbound": outbound_count,
+            })
+    except Exception:
+        pass
+
+    return JSONResponse({"peers": [], "inbound": 0, "outbound": 0})
 
 
 @app.route("/batch-narinfo", methods=["POST"])
