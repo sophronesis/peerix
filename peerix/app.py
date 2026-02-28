@@ -693,8 +693,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
                 document.getElementById('error').style.display = 'none';
 
-                // Scan progress
-                const percent = scan.percent || 0;
+                // Scan progress (cap at 100%)
+                const percent = Math.min(100, scan.percent || 0);
                 document.getElementById('percent').textContent = percent.toFixed(1) + '%';
                 document.getElementById('bar').style.width = percent + '%';
 
@@ -704,8 +704,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 document.getElementById('cached').textContent = scan.already_cached || 0;
                 document.getElementById('skipped').textContent = scan.skipped || 0;
 
-                // Announcement progress
-                const announcePercent = announce.percent || 0;
+                // Announcement progress (cap at 100%)
+                const announcePercent = Math.min(100, announce.percent || 0);
                 document.getElementById('announce-percent').textContent = announcePercent.toFixed(1) + '%';
                 document.getElementById('announce-bar').style.width = announcePercent + '%';
                 document.getElementById('announce-announced').textContent = announce.announced || 0;
