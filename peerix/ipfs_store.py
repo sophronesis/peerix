@@ -398,7 +398,23 @@ class IPFSStore(Store):
         import time
         progress = self._announce_progress.copy()
 
+        # Count CIDs needing announcement (not announced or expired)
+        now = time.time()
+        all_cids = set(self._cid_cache.values())
+        total_cids = len(all_cids)
+        fresh_announced = sum(
+            1 for cid in all_cids
+            if cid in self._announced_cache
+            and (now - self._announced_cache[cid]) < self._reannounce_interval
+        )
+        pending = total_cids - fresh_announced
+        progress["pending"] = pending
+        progress["fresh_announced"] = fresh_announced
+        progress["total_cids"] = total_cids
+        progress["paused"] = self._reannounce_paused
+
         if progress["active"] and progress["started_at"] and progress["total"] > 0:
+            # Active manual announcement - show progress of that operation
             done = progress["announced"] + progress["failed"] + progress["skipped"]
             progress["percent"] = round(100 * done / progress["total"], 1)
 
@@ -411,21 +427,12 @@ class IPFSStore(Store):
             else:
                 progress["eta_seconds"] = None
         else:
-            progress["percent"] = 0.0
+            # Background re-announcement - show overall progress
+            if total_cids > 0:
+                progress["percent"] = round(100 * fresh_announced / total_cids, 1)
+            else:
+                progress["percent"] = 0.0
             progress["eta_seconds"] = None
-
-        # Count CIDs needing announcement (not announced or expired)
-        now = time.time()
-        all_cids = set(self._cid_cache.values())
-        fresh_announced = sum(
-            1 for cid in all_cids
-            if cid in self._announced_cache
-            and (now - self._announced_cache[cid]) < self._reannounce_interval
-        )
-        pending = len(all_cids) - fresh_announced
-        progress["pending"] = pending
-        progress["fresh_announced"] = fresh_announced
-        progress["paused"] = self._reannounce_paused
 
         # ETA for re-announce (based on pending count and rate of ~1 per 10s)
         if pending > 0 and not self._reannounce_paused:
