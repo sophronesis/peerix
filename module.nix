@@ -153,6 +153,19 @@ in
           '';
         };
 
+        routingType = lib.mkOption {
+          type = types.enum [ "dhtclient" "dht" "dhtserver" "none" "autoclient" ];
+          default = "dhtclient";
+          description = ''
+            IPFS routing type. Options:
+            - "dhtclient": Client-only DHT (default, lightweight, recommended)
+            - "dht": Full DHT participation (can cause network timeouts on startup)
+            - "dhtserver": DHT server mode (heavy, can cause network timeouts)
+            - "autoclient": Automatically switch between client/server
+            - "none": No routing (isolated node)
+          '';
+        };
+
         rateLimit = {
           enable = lib.mkOption {
             type = types.bool;
@@ -357,8 +370,10 @@ in
       services.kubo = {
         enable = true;
         settings = {
-          # Enable accelerated DHT client for faster lookups
-          Routing.AcceleratedDHTClient = true;
+          # Routing type (dhtclient is lightweight, dht/dhtserver can timeout on start)
+          Routing.Type = cfg.ipfs.routingType;
+          # Enable accelerated DHT client for faster lookups (only for dhtclient mode)
+          Routing.AcceleratedDHTClient = (cfg.ipfs.routingType == "dhtclient");
           # Set API to listen on TCP for peerix access
           Addresses.API = "/ip4/127.0.0.1/tcp/5001";
           # CORS headers for API access
