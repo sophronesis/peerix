@@ -166,6 +166,17 @@ in
           '';
         };
 
+        acceleratedDHTClient = lib.mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Enable accelerated DHT client for faster lookups.
+            Uses parallel queries and aggressive caching.
+            Can increase bandwidth/connections at startup.
+            Only effective when routingType is "dhtclient".
+          '';
+        };
+
         rateLimit = {
           enable = lib.mkOption {
             type = types.bool;
@@ -372,8 +383,8 @@ in
         settings = {
           # Routing type (dhtclient is lightweight, dht/dhtserver can timeout on start)
           Routing.Type = cfg.ipfs.routingType;
-          # Enable accelerated DHT client for faster lookups (only for dhtclient mode)
-          Routing.AcceleratedDHTClient = (cfg.ipfs.routingType == "dhtclient");
+          # Accelerated DHT client (parallel queries, more bandwidth on startup)
+          Routing.AcceleratedDHTClient = cfg.ipfs.acceleratedDHTClient;
           # Set API to listen on TCP for peerix access
           Addresses.API = "/ip4/127.0.0.1/tcp/5001";
           # CORS headers for API access
