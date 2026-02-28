@@ -534,29 +534,41 @@ async def test_two_nodes():
         print("\nBoth nodes stopped", flush=True)
 
 
-async def test_tracker_connectivity(tracker_url: str, peer_id: str):
+async def test_tracker_connectivity(tracker_url: str, peer_id: str, use_real_store: bool = False):
     """Test Iroh node with tracker integration."""
     print(f"\nTesting Iroh node with tracker: {tracker_url}", flush=True)
 
-    class MockNarInfo:
-        def __init__(self, content):
-            self.content = content
-        def dump(self):
-            return self.content
+    store_ctx = None
+    if use_real_store:
+        try:
+            from .local_asyncio import local_async
+        except ImportError:
+            from local_asyncio import local_async
+        print("Starting real LocalStore...", flush=True)
+        store_ctx = local_async()
+        store = await store_ctx.__aenter__()
+        print("LocalStore ready!", flush=True)
+    else:
+        class MockNarInfo:
+            def __init__(self, content):
+                self.content = content
+            def dump(self):
+                return self.content
 
-    class MockStore:
-        def __init__(self, name):
-            self.name = name
+        class MockStore:
+            def __init__(self, name):
+                self.name = name
 
-        async def narinfo(self, hash):
-            print(f"[{self.name}] narinfo requested for {hash}", flush=True)
-            content = f"StorePath: /nix/store/{hash}-{self.name}\nNarHash: sha256:{self.name}\nNarSize: 100\nReferences:\n"
-            return MockNarInfo(content)
+            async def narinfo(self, hash):
+                print(f"[{self.name}] narinfo requested for {hash}", flush=True)
+                content = f"StorePath: /nix/store/{hash}-{self.name}\nNarHash: sha256:{self.name}\nNarSize: 100\nReferences:\n"
+                return MockNarInfo(content)
 
-        async def nar(self, url):
-            yield f"NAR data from {self.name}".encode()
+            async def nar(self, url):
+                yield f"NAR data from {self.name}".encode()
 
-    store = MockStore(peer_id)
+        store = MockStore(peer_id)
+
     node = IrohNode(store, tracker_url=tracker_url, peer_id=peer_id)
 
     try:
@@ -617,6 +629,8 @@ async def test_tracker_connectivity(tracker_url: str, peer_id: str):
         print("\nStopping...", flush=True)
     finally:
         await node.stop()
+        if store_ctx:
+            await store_ctx.__aexit__(None, None, None)
         print("Node stopped", flush=True)
 
 
@@ -638,6 +652,8 @@ def cli():
                         help="Human-readable peer ID (default: hostname)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
+    parser.add_argument("--real-store", "-r", action="store_true",
+                        help="Use real LocalStore instead of mock (requires nix-serve)")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -646,7 +662,7 @@ def cli():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
-    asyncio.run(test_tracker_connectivity(args.tracker, args.peer_id))
+    asyncio.run(test_tracker_connectivity(args.tracker, args.peer_id, args.real_store))
 
 
 if __name__ == "__main__":
