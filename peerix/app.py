@@ -646,7 +646,6 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <thead>
                     <tr>
                         <th></th>
-                        <th>Dir</th>
                         <th>IP</th>
                         <th>In</th>
                         <th>Out</th>
@@ -885,6 +884,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                                 return bytes + 'B';
                             };
 
+                            // Truncate IP to max 15 chars
+                            const truncateIp = (ip) => {
+                                if (!ip || ip.length <= 15) return ip;
+                                return ip.substring(0, 12) + '...';
+                            };
+
                             // Show first 15 peers
                             for (const peer of ipfsPeers.slice(0, 15)) {
                                 const tr = document.createElement('tr');
@@ -894,20 +899,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                                 flagTd.textContent = countryToFlag(peer.country || '');
                                 tr.appendChild(flagTd);
 
-                                // Direction cell
-                                const dirTd = document.createElement('td');
-                                if (peer.direction === 'in') {
-                                    dirTd.innerHTML = '<span style="color:#00ff88">↓</span>';
-                                    dirTd.title = 'Inbound';
-                                } else {
-                                    dirTd.innerHTML = '<span style="color:#00d9ff">↑</span>';
-                                    dirTd.title = 'Outbound';
-                                }
-                                tr.appendChild(dirTd);
-
-                                // IP cell
+                                // IP cell (truncated)
                                 const ipTd = document.createElement('td');
-                                ipTd.textContent = peer.ip;
+                                ipTd.textContent = truncateIp(peer.ip);
+                                if (peer.ip && peer.ip.length > 15) {
+                                    ipTd.title = peer.ip;
+                                }
                                 tr.appendChild(ipTd);
 
                                 // In bandwidth cell
@@ -929,7 +926,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                             if (ipfsPeers.length > 15) {
                                 const tr = document.createElement('tr');
                                 const td = document.createElement('td');
-                                td.colSpan = 5;
+                                td.colSpan = 4;
                                 td.textContent = '... and ' + (ipfsPeers.length - 15) + ' more';
                                 td.style.color = '#666';
                                 td.style.textAlign = 'center';
