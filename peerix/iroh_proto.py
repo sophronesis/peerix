@@ -144,10 +144,12 @@ class IrohNode:
     - Connecting to peers by public key
     """
 
-    def __init__(self, local_store, tracker_url: str = None, peer_id: str = None):
+    def __init__(self, local_store, tracker_url: str = None, peer_id: str = None,
+                 connect_timeout: float = 10.0):
         self.local_store = local_store
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID
+        self.connect_timeout = connect_timeout  # Timeout for peer connections
         self.iroh: t.Optional[iroh.Iroh] = None
         self.node: t.Optional[iroh.Node] = None
         self.endpoint: t.Optional[iroh.Endpoint] = None
@@ -244,7 +246,8 @@ class IrohNode:
         pub_key = iroh.PublicKey.from_string(node_id)
         return iroh.NodeAddr(pub_key, None, [])
 
-    async def connect(self, node_id: str, protocol: bytes = NARINFO_PROTOCOL) -> iroh.Connection:
+    async def connect(self, node_id: str, protocol: bytes = NARINFO_PROTOCOL,
+                      timeout: float = None) -> iroh.Connection:
         """
         Connect to a peer by node ID.
 
@@ -252,15 +255,33 @@ class IrohNode:
         1. Tries direct connection
         2. Falls back to hole punching
         3. Falls back to relay if needed
+
+        Args:
+            node_id: The peer's node ID (public key)
+            protocol: ALPN protocol identifier
+            timeout: Connection timeout in seconds (default: self.connect_timeout)
+
+        Raises:
+            asyncio.TimeoutError: If connection times out
+            RuntimeError: If node not started
         """
         if not self.endpoint:
             raise RuntimeError("Node not started")
 
-        logger.debug(f"Connecting to {node_id}...")
+        timeout = timeout or self.connect_timeout
+        logger.debug(f"Connecting to {node_id[:16]}... (timeout={timeout}s)")
         node_addr = self._get_node_addr(node_id)
-        conn = await self.endpoint.connect(node_addr, protocol)
-        logger.debug(f"Connected to {node_id}")
-        return conn
+
+        try:
+            conn = await asyncio.wait_for(
+                self.endpoint.connect(node_addr, protocol),
+                timeout=timeout
+            )
+            logger.debug(f"Connected to {node_id[:16]}...")
+            return conn
+        except asyncio.TimeoutError:
+            logger.warning(f"Connection to {node_id[:16]}... timed out")
+            raise
 
     async def fetch_narinfo(self, node_id: str, nar_hash: str) -> t.Optional[str]:
         """Fetch narinfo from a peer."""
@@ -307,6 +328,41 @@ class IrohNode:
             if not chunk:
                 break
             yield chunk
+
+    async def fetch_narinfo_from_peers(self, nar_hash: str,
+                                       max_attempts: int = 3) -> t.Optional[t.Tuple[str, str]]:
+        """
+        Try to fetch narinfo from known peers with fallback.
+
+        Args:
+            nar_hash: The store path hash to look up
+            max_attempts: Maximum number of peers to try
+
+        Returns:
+            Tuple of (narinfo_content, node_id) if found, None otherwise
+        """
+        attempts = 0
+        for node_id in list(self._known_peers.keys()):
+            if attempts >= max_attempts:
+                break
+
+            attempts += 1
+            logger.debug(f"Trying peer {node_id[:16]}... ({attempts}/{max_attempts})")
+
+            try:
+                narinfo = await self.fetch_narinfo(node_id, nar_hash)
+                if narinfo:
+                    logger.info(f"Got narinfo from {node_id[:16]}...")
+                    return (narinfo, node_id)
+            except asyncio.TimeoutError:
+                logger.debug(f"Peer {node_id[:16]}... timed out, trying next")
+                continue
+            except Exception as e:
+                logger.debug(f"Peer {node_id[:16]}... failed: {e}, trying next")
+                continue
+
+        logger.debug(f"No peer had narinfo for {nar_hash}")
+        return None
 
     # ========== Tracker Integration ==========
 
