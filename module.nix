@@ -482,6 +482,11 @@ in
           Swarm.ResourceMgr.Enabled = cfg.ipfs.resourceMgr.enabled;
           # QUIC transport
           Swarm.Transports.Network.QUIC = cfg.ipfs.enableQUIC;
+          # Minimal bootstrap nodes (reduce initial connection storm)
+          Bootstrap = [
+            "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"
+            "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"
+          ];
         };
       };
 
