@@ -187,6 +187,16 @@ in
           '';
         };
 
+        provideDHTInterval = lib.mkOption {
+          type = types.str;
+          default = "22h";
+          description = ''
+            Interval for IPFS to announce pinned content to the DHT.
+            Set to "0" to disable automatic DHT providing.
+            Default "22h" provides content gradually without flooding.
+          '';
+        };
+
         enableQUIC = lib.mkOption {
           type = types.bool;
           default = true;
@@ -452,6 +462,8 @@ in
           Routing.Type = cfg.ipfs.routingType;
           # Accelerated DHT client (parallel queries, more bandwidth on startup)
           Routing.AcceleratedDHTClient = cfg.ipfs.acceleratedDHTClient;
+          # DHT provide interval (how often IPFS announces pinned content)
+          Provide.DHT.Interval = cfg.ipfs.provideDHTInterval;
           # Set API to listen on TCP for peerix access
           Addresses.API = "/ip4/127.0.0.1/tcp/5001";
           # CORS headers for API access

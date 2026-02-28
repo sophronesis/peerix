@@ -879,8 +879,10 @@ class IPFSStore(Store):
         self,
         extra_patterns: t.List[str] = None,
         concurrency: int = 10,
-        dht_concurrency: int = 3,
+        dht_concurrency: int = 1,  # Single-threaded to avoid floods
         announce_to_dht: bool = True,
+        dht_announce_delay: float = 2.0,  # Seconds between announcements
+        dht_max_per_scan: int = 50,  # Max announcements per scan cycle
     ) -> t.Tuple[int, int]:
         """
         Scan local nix store and publish applicable packages to IPFS.
@@ -999,6 +1001,7 @@ class IPFSStore(Store):
                     # Check if CID exists on tracker (use store hash as key)
                     if hsh in tracker_cids:
                         # Use existing CID from tracker, skip IPFS upload
+                        # Don't announce - original publisher already announced to DHT
                         cid = tracker_cids[hsh]
                         self._cid_cache[hsh] = cid
                         self._mark_dirty()
@@ -1006,12 +1009,6 @@ class IPFSStore(Store):
                         self._scan_progress["from_tracker"] = counters["from_tracker"]
                         self._scan_progress["processed"] += 1
                         logger.debug(f"Using tracker CID for {hsh}: {cid}")
-                        # Queue for DHT announcement (parallel with scan)
-                        if announce_to_dht and cid not in self._announced_cache:
-                            try:
-                                dht_send_channel.send_nowait(cid)
-                            except trio.WouldBlock:
-                                pass  # Channel full, skip this one
                         return
 
                     # Not on tracker - publish to IPFS
@@ -1069,11 +1066,17 @@ class IPFSStore(Store):
                     logger.debug("Periodic save: announced cache")
 
         async def dht_announcer() -> None:
-            """Background task that announces CIDs to DHT in parallel with scanning."""
+            """Background task that announces CIDs to DHT with rate limiting."""
             announced_count = 0
             failed_count = 0
+            skipped_count = 0
             async with dht_recv_channel:
                 async for cid in dht_recv_channel:
+                    # Stop if we've hit the per-scan limit
+                    if announced_count >= dht_max_per_scan:
+                        skipped_count += 1
+                        continue
+
                     async with dht_semaphore:
                         try:
                             success = await self.announce_to_dht(cid)
@@ -1084,7 +1087,15 @@ class IPFSStore(Store):
                         except Exception as e:
                             logger.debug(f"DHT announce error: {e}")
                             failed_count += 1
-            logger.info(f"DHT announcer finished: {announced_count} announced, {failed_count} failed")
+
+                        # Delay between announcements to avoid flooding
+                        if dht_announce_delay > 0:
+                            await trio.sleep(dht_announce_delay)
+
+            logger.info(
+                f"DHT announcer finished: {announced_count} announced, "
+                f"{failed_count} failed, {skipped_count} skipped (limit={dht_max_per_scan})"
+            )
 
         async def run_scan_work() -> None:
             async with dht_send_channel:
