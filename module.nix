@@ -440,6 +440,9 @@ in
             (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
             (lib.mkIf (cfg.publicKey != null) cfg.publicKey)
           ];
+          # Fail fast if peerix is down, fall back to other caches
+          connect-timeout = 2;
+          fallback = true;
         };
         extraOptions = lib.mkIf (cfg.globalCacheTTL != null) ''
           narinfo-cache-negative-ttl = ${toString cfg.globalCacheTTL}
