@@ -803,7 +803,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 const announcePercent = Math.min(100, announce.percent || 0);
                 document.getElementById('announce-percent').textContent = announcePercent.toFixed(1) + '%';
                 document.getElementById('announce-bar').style.width = announcePercent + '%';
-                document.getElementById('announce-announced').textContent = announce.announced || 0;
+                document.getElementById('announce-announced').textContent = announce.fresh_announced || 0;
                 document.getElementById('announce-pending').textContent = announce.pending || 0;
 
                 // Announcement ETA
