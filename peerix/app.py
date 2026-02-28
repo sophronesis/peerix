@@ -684,6 +684,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Reannouncing</span>
                 <span class="status-value" id="reannounce-active">--</span>
             </div>
+            <div class="status-row" id="homeo-status-row" style="display: none;">
+                <span class="status-label">Homeostasis</span>
+                <span class="status-value" id="homeo-quick-status">--</span>
+            </div>
             <div class="status-row">
                 <span class="status-label">Tracker</span>
                 <span class="status-value" id="tracker-url" style="font-size: 0.8em;">--</span>
@@ -1005,16 +1009,23 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
                 // Homeostasis status
                 const homeoCard = document.getElementById('homeostasis-card');
+                const homeoStatusRow = document.getElementById('homeo-status-row');
+                const homeoQuickStatus = document.getElementById('homeo-quick-status');
                 if (homeo.enabled) {
                     homeoCard.style.display = 'block';
+                    homeoStatusRow.style.display = 'flex';
 
                     const statusEl = document.getElementById('homeo-status');
                     if (homeo.consecutive_unhealthy > 0) {
                         statusEl.textContent = 'Unhealthy (' + homeo.consecutive_unhealthy + ')';
                         statusEl.style.color = '#ff6b6b';
+                        homeoQuickStatus.textContent = homeo.latency_ms.toFixed(0) + 'ms | ' + homeo.peer_count + ' peers';
+                        homeoQuickStatus.style.color = '#ff6b6b';
                     } else {
                         statusEl.textContent = 'Healthy';
                         statusEl.style.color = '#4cd964';
+                        homeoQuickStatus.textContent = homeo.latency_ms.toFixed(0) + 'ms | ' + homeo.peer_count + ' peers';
+                        homeoQuickStatus.style.color = '#4cd964';
                     }
 
                     const latencyEl = document.getElementById('homeo-latency');
@@ -1036,6 +1047,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                         homeo.config.min_peers + '-' + homeo.config.max_peers;
                 } else {
                     homeoCard.style.display = 'none';
+                    homeoStatusRow.style.display = 'none';
                 }
 
                 // Tracker URL
