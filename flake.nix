@@ -86,17 +86,32 @@
         buildInputs = with pkgs; [
           nix-serve
           niv
+          uv
           (python.withPackages (ps: corePackages ++ (with ps; [
             # Dev dependencies
             pytest
             pytest-asyncio
             black
             mypy
+            pip
           ])))
         ];
 
         shellHook = ''
-          echo "Peerix development shell"
+          # Create venv if it doesn't exist
+          if [ ! -d .venv ]; then
+            echo "Creating virtual environment..."
+            python -m venv .venv
+          fi
+          source .venv/bin/activate
+
+          # Install iroh if not present
+          if ! python -c "import iroh" 2>/dev/null; then
+            echo "Installing iroh..."
+            uv pip install iroh
+          fi
+
+          echo "Peerix development shell (with iroh)"
           echo ""
           echo "Run peerix: python -m peerix --mode ipfs"
           echo ""
