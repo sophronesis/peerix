@@ -642,7 +642,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Outbound</span>
                 <span class="status-value" id="ipfs-outbound-count" style="color: #00d9ff;">--</span>
             </div>
-            <table class="peers-table">
+            <table class="peers-table" style="font-size: 11px;">
                 <thead>
                     <tr>
                         <th></th>
