@@ -88,9 +88,9 @@ async def setup_stores(
                     # Start periodic DHT re-announcement (starts PAUSED by default)
                     nursery.start_soon(
                         ipfs_info["store"].run_periodic_reannounce,
-                        2,    # concurrency (conservative)
-                        10,   # batch_size (very slow)
-                        30.0, # batch_delay (30s between batches)
+                        1,    # concurrency (1 at a time)
+                        1,    # batch_size (1 CID at a time)
+                        60.0, # batch_delay (60s between announcements)
                     )
                     yield
                     nursery.cancel_scope.cancel()
