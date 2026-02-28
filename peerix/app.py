@@ -606,7 +606,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             <h2>Progress</h2>
             <div style="margin-bottom: 16px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                    <span style="color: #888;">Scan <button class="ctrl-btn" id="scan-toggle" onclick="toggleScan()" title="Pause/Resume">▶</button></span>
+                    <span style="color: #888;"><button class="ctrl-btn" id="scan-toggle" onclick="toggleScan()" title="Pause/Resume">▶</button> Scan</span>
                     <span id="percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="bar" style="width: 0%"></div></div>
@@ -615,7 +615,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             </div>
             <div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                    <span style="color: #888;">DHT Announce <button class="ctrl-btn" id="dht-toggle" onclick="toggleDHT()" title="Pause/Resume">▶</button></span>
+                    <span style="color: #888;"><button class="ctrl-btn" id="dht-toggle" onclick="toggleDHT()" title="Pause/Resume">▶</button> DHT Announce</span>
                     <span id="announce-percent">--</span>
                 </div>
                 <div class="progress-bar"><div class="fill" id="announce-bar" style="width: 0%; background: linear-gradient(90deg, #ff9500, #ff5500);"></div></div>

@@ -126,9 +126,9 @@ class IPFSStore(Store):
             "started_at": None,
         }
 
-        # Pause states (reannounce starts paused to avoid network flooding on startup)
+        # Pause states
         self._scan_paused: bool = False
-        self._reannounce_paused: bool = True
+        self._reannounce_paused: bool = False
 
     def set_tracker_client(self, tracker_client: t.Any) -> None:
         """Set the tracker client for CID registry."""
