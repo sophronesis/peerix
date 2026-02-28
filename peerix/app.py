@@ -641,6 +641,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset));
         }
 
+        let lastVersion = null;
+
         async function update() {
             try {
                 const [scanResp, statsResp, announceResp] = await Promise.all([
@@ -656,6 +658,15 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 const scan = await scanResp.json();
                 const stats = await statsResp.json();
                 const announce = await announceResp.json();
+
+                // Auto-reload on version change
+                if (stats.dashboard_version) {
+                    if (lastVersion && lastVersion !== stats.dashboard_version) {
+                        location.reload();
+                        return;
+                    }
+                    lastVersion = stats.dashboard_version;
+                }
 
                 document.getElementById('error').style.display = 'none';
 
@@ -846,8 +857,10 @@ async def dashboard(req: Request) -> Response:
 @app.route("/dashboard-stats")
 async def dashboard_stats(req: Request) -> Response:
     """Get dashboard statistics as JSON."""
+    import hashlib
     stats = {
         "mode": "ipfs" if ipfs_access else "lan",
+        "dashboard_version": hashlib.md5(DASHBOARD_HTML.encode()).hexdigest()[:8],
         "cid_cache_size": 0,
         "skipped_cache_size": 0,
         "total_dht_announced": 0,
