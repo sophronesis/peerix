@@ -422,9 +422,17 @@ class IPFSStore(Store):
             if cid in self._announced_cache
             and (now - self._announced_cache[cid]) < self._reannounce_interval
         )
-        progress["pending"] = len(all_cids) - fresh_announced
+        pending = len(all_cids) - fresh_announced
+        progress["pending"] = pending
         progress["fresh_announced"] = fresh_announced
         progress["paused"] = self._reannounce_paused
+
+        # ETA for re-announce (based on pending count and rate of ~1 per 60s)
+        if pending > 0 and not self._reannounce_paused:
+            # Rate is approximately 1 CID per 60 seconds
+            progress["reannounce_eta_seconds"] = pending * 60
+        else:
+            progress["reannounce_eta_seconds"] = None
 
         return progress
 

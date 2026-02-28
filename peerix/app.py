@@ -808,8 +808,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
                 // Announcement ETA
                 const announceEtaEl = document.getElementById('announce-eta');
-                if (announce.active && announce.eta_seconds) {
-                    const eta = announce.eta_seconds;
+                const eta = announce.active ? announce.eta_seconds : announce.reannounce_eta_seconds;
+                if (eta) {
                     let etaText;
                     if (eta < 60) {
                         etaText = Math.round(eta) + 's remaining';
@@ -817,12 +817,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                         const mins = Math.floor(eta / 60);
                         const secs = Math.round(eta % 60);
                         etaText = mins + 'm ' + secs + 's remaining';
-                    } else {
+                    } else if (eta < 86400) {
                         const hours = Math.floor(eta / 3600);
                         const mins = Math.floor((eta % 3600) / 60);
                         etaText = hours + 'h ' + mins + 'm remaining';
+                    } else {
+                        const days = Math.floor(eta / 86400);
+                        const hours = Math.floor((eta % 86400) / 3600);
+                        etaText = days + 'd ' + hours + 'h remaining';
                     }
-                    announceEtaEl.textContent = etaText;
+                    announceEtaEl.textContent = announce.paused ? '' : etaText;
                 } else {
                     announceEtaEl.textContent = announce.active ? 'Starting...' : '';
                 }
