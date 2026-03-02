@@ -51,12 +51,14 @@
 - [ ] Make compression level configurable
 - [ ] Consider caching compressed NARs for frequently requested packages
 
-### 9. Iroh Streaming Reliability
+### 9. Iroh Streaming Reliability ✅
 - [x] Investigate IrohError during NAR streaming (connection drops mid-transfer)
-  - Root cause: Iroh stream read() fails before all data arrives when sender calls finish() too quickly
-  - Fix: Added 100ms delay before send.finish() to let buffers flush
-- [x] Add retry logic for failed NAR fetches (with timeout and 3 retries)
-- [ ] Consider chunked transfers with resume capability
+  - Root cause: Iroh QUIC buffers not fully transmitted before finish() called
+  - Fix: Length-prefixed protocol with chunked sending and delays
+- [x] Length-prefixed protocol: send 8-byte size header, then exact bytes
+- [x] Chunked sending: 16KB chunks with 20ms delay every 64KB
+- [x] Buffer flush delay: 500ms base + 300ms per MB before finish()
+- [x] Tested working with files up to 1.6MB via Iroh relay
 - [ ] Report upstream bug to Iroh team about stream truncation
 
 ## Completed
@@ -71,4 +73,6 @@
 - [x] Delta sync for package hashes
 - [x] Nixpkgs filtering (NixpkgsFilteredStore)
 - [x] Hash verification (VerifiedStore)
+- [x] Filtered hash caching (/var/lib/peerix/filtered_hashes.json)
+- [x] Dashboard hash-based change detection (efficient DOM updates)
 - [x] Dashboard with Iroh status and controls
