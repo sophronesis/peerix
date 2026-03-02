@@ -124,6 +124,9 @@ _local_store: t.Optional[LocalStoreAsync] = None
 _cache_priority: int = 5
 _store_manager: t.Optional["StoreManager"] = None
 
+# Cache for IP -> country code lookups
+_ip_country_cache: t.Dict[str, str] = {}
+
 
 class StoreManager:
     """
@@ -727,16 +730,80 @@ async def status_handler(request: Request) -> Response:
 
 
 async def peers_handler(request: Request) -> Response:
-    """List known Iroh peers."""
+    """List known Iroh peers with IP addresses and country flags."""
+    global _ip_country_cache
+
     if not _iroh_node:
-        return JSONResponse({"peers": []})
+        return JSONResponse({"peers": [], "count": 0})
+
+    hide_ip = request.query_params.get("hide_ip", "false").lower() == "true"
 
     peers = []
-    for node_id in _iroh_node._known_peers:
-        peers.append({
+    ips_to_lookup = []
+
+    for node_id, node_addr in _iroh_node._known_peers.items():
+        # Extract IP from direct_addrs (format: "ip:port")
+        ip = None
+        try:
+            direct_addrs = node_addr.direct_addresses()
+            if direct_addrs:
+                # Take the first address, extract IP part
+                addr_str = str(direct_addrs[0])
+                # Handle IPv4 and IPv6 formats
+                if addr_str.startswith("["):
+                    # IPv6: [::1]:port
+                    ip = addr_str.split("]:")[0][1:]
+                else:
+                    # IPv4: 1.2.3.4:port
+                    ip = addr_str.rsplit(":", 1)[0]
+        except Exception:
+            pass
+
+        peer_info = {
             "node_id": node_id,
             "node_id_short": node_id[:16] + "...",
-        })
+            "ip": None if hide_ip else ip,
+            "country": "",
+        }
+        peers.append(peer_info)
+
+        # Collect IPs for geo lookup
+        if ip and ip not in _ip_country_cache:
+            ips_to_lookup.append((peer_info, ip))
+
+    # Batch lookup country codes using ip-api.com
+    if ips_to_lookup:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # ip-api.com batch endpoint
+                resp = await client.post(
+                    "http://ip-api.com/batch?fields=query,countryCode",
+                    json=[ip for _, ip in ips_to_lookup],
+                )
+                if resp.status_code == 200:
+                    for item in resp.json():
+                        _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
+        except Exception as e:
+            logger.debug(f"Geo lookup failed: {e}")
+
+    # Add country codes to peers
+    for peer in peers:
+        ip = peer.get("ip") if not hide_ip else None
+        # Try to get country from cache even if IP is hidden (we still know the IP internally)
+        for node_id, node_addr in _iroh_node._known_peers.items():
+            if peer["node_id"] == node_id:
+                try:
+                    direct_addrs = node_addr.direct_addresses()
+                    if direct_addrs:
+                        addr_str = str(direct_addrs[0])
+                        if addr_str.startswith("["):
+                            actual_ip = addr_str.split("]:")[0][1:]
+                        else:
+                            actual_ip = addr_str.rsplit(":", 1)[0]
+                        peer["country"] = _ip_country_cache.get(actual_ip, "")
+                except Exception:
+                    pass
+                break
 
     return JSONResponse({"peers": peers, "count": len(peers)})
 
@@ -930,7 +997,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         </div>
         <div class="card">
             <h2>Peers</h2>
-            <div class="value" id="peer-count">0</div>
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                <div class="value" id="peer-count">0</div>
+                <label style="font-size: 11px; color: #888; cursor: pointer;">
+                    <input type="checkbox" id="hide-ip" style="margin-right: 4px;"> Hide IPs
+                </label>
+            </div>
             <div class="peers-list" id="peers-list"></div>
         </div>
         <div class="card">
@@ -992,6 +1064,13 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             return date.toLocaleTimeString();
         }
 
+        // Country code to flag emoji
+        function countryToFlag(code) {
+            if (!code || code.length !== 2) return '';
+            const offset = 127397;
+            return String.fromCodePoint(...[...code.toUpperCase()].map(c => c.charCodeAt(0) + offset));
+        }
+
         // Simple hash function for change detection
         function hashData(obj) {
             return JSON.stringify(obj);
@@ -999,9 +1078,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function update() {
             try {
+                const hideIp = document.getElementById('hide-ip')?.checked || false;
                 const [statsResp, peersResp] = await Promise.all([
                     fetch('/dashboard-stats'),
-                    fetch('/peers')
+                    fetch('/peers' + (hideIp ? '?hide_ip=true' : ''))
                 ]);
 
                 const stats = await statsResp.json();
@@ -1041,8 +1121,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 for (const peer of (peersData.peers || [])) {
                     const div = document.createElement('div');
                     div.className = 'peer-item';
-                    div.textContent = peer.node_id_short;
-                    div.title = peer.node_id;
+                    const flag = countryToFlag(peer.country);
+                    const ipPart = peer.ip ? ` (${peer.ip})` : '';
+                    div.innerHTML = `<span style="margin-right: 6px;">${flag}</span>${peer.node_id_short}${ipPart}`;
+                    div.title = peer.node_id + (peer.ip ? '\\n' + peer.ip : '');
                     peersList.appendChild(div);
                 }
 
