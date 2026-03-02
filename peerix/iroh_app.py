@@ -806,6 +806,23 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         </div>
         <div class="card">
             <h2>Store</h2>
+            <div id="filter-progress" style="display: none; margin-bottom: 16px;">
+                <div class="status-row">
+                    <span class="status-label">Filtering</span>
+                    <span class="status-value"><span id="filter-checked">0</span> / <span id="filter-total">0</span></span>
+                </div>
+                <div class="progress-bar">
+                    <div class="fill" id="filter-bar" style="width: 0%"></div>
+                </div>
+                <div class="status-row" style="margin-top: 8px;">
+                    <span class="status-label">Found in cache.nixos.org</span>
+                    <span class="status-value success" id="filter-found">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">ETA</span>
+                    <span class="status-value" id="filter-eta">--</span>
+                </div>
+            </div>
             <div class="status-row">
                 <span class="status-label">Available Paths</span>
                 <span class="value" id="available-hashes">--</span>
@@ -889,6 +906,22 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     } else {
                         btn.textContent = 'Pause Scan';
                         btn.className = 'ctrl-btn running';
+                    }
+
+                    // Filter progress
+                    const filterProgress = document.getElementById('filter-progress');
+                    if (stats.scan.active && stats.scan.filtering_enabled && stats.scan.filter_checked > 0) {
+                        filterProgress.style.display = 'block';
+                        const checked = stats.scan.filter_checked || 0;
+                        const total = stats.scan.total || 1;
+                        const pct = (checked / total) * 100;
+                        document.getElementById('filter-checked').textContent = checked.toLocaleString();
+                        document.getElementById('filter-total').textContent = total.toLocaleString();
+                        document.getElementById('filter-bar').style.width = pct + '%';
+                        document.getElementById('filter-found').textContent = (stats.scan.filter_found || 0).toLocaleString();
+                        document.getElementById('filter-eta').textContent = stats.scan.filter_eta || 'calculating...';
+                    } else {
+                        filterProgress.style.display = 'none';
                     }
                 }
 
