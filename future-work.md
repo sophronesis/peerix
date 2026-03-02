@@ -39,11 +39,22 @@
 ### 7. Dashboard ✅
 - [x] Port dashboard HTML from `app.py`
 - [x] Adapt for Iroh mode (show Iroh peers instead of IPFS swarm)
-- [ ] Progress tracking with Kalman filter ETA - deferred (scan is fast, not needed)
+- [x] Progress tracking with Kalman filter ETA
 - [x] Pause/resume controls for scanning
 - [ ] Show tracker peers with geo-location - deferred
 - [x] `/status` endpoint with full node info
 - [x] `/dashboard-stats` JSON endpoint
+
+### 8. NAR Compression
+- [ ] Compress NARs on-the-fly (zstd or xz)
+- [ ] Add `Compression: zstd` header to narinfo
+- [ ] Make compression level configurable
+- [ ] Consider caching compressed NARs for frequently requested packages
+
+### 9. Iroh Streaming Reliability
+- [ ] Investigate IrohError during NAR streaming (connection drops mid-transfer)
+- [ ] Add retry logic for failed NAR fetches
+- [ ] Consider chunked transfers with resume capability
 
 ## Completed
 - [x] Persistent node identity (Ed25519 secret key)
