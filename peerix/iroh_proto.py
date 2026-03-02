@@ -82,8 +82,9 @@ class PeerInfo:
 class NarinfoProtocol(iroh.ProtocolHandler):
     """Protocol handler for narinfo requests."""
 
-    def __init__(self, local_store):
+    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str], None]] = None):
         self.local_store = local_store
+        self.on_served = on_served  # Callback: (hash, name) -> None
 
     async def accept(self, conn: iroh.Connection):
         """Handle incoming narinfo request."""
@@ -107,6 +108,15 @@ class NarinfoProtocol(iroh.ProtocolHandler):
             if narinfo:
                 response = narinfo.dump().encode('utf-8')
                 logger.debug(f"Sending narinfo ({len(response)} bytes)")
+                # Track served package
+                if self.on_served:
+                    # Extract name from store path
+                    name = ""
+                    if narinfo.storePath:
+                        basename = narinfo.storePath.split("/")[-1]
+                        if len(basename) > 33 and basename[32] == "-":
+                            name = basename[33:]
+                    self.on_served(nar_hash, name)
             else:
                 response = b"NOTFOUND"
                 logger.debug(f"Narinfo not found for {nar_hash}")
@@ -125,18 +135,20 @@ class NarinfoProtocol(iroh.ProtocolHandler):
 class NarinfoProtocolCreator(iroh.ProtocolCreator):
     """Factory for NarinfoProtocol."""
 
-    def __init__(self, local_store):
+    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str], None]] = None):
         self.local_store = local_store
+        self.on_served = on_served
 
     def create(self, endpoint) -> iroh.ProtocolHandler:
-        return NarinfoProtocol(self.local_store)
+        return NarinfoProtocol(self.local_store, self.on_served)
 
 
 class NarProtocol(iroh.ProtocolHandler):
     """Protocol handler for NAR streaming."""
 
-    def __init__(self, local_store):
+    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
         self.local_store = local_store
+        self.on_nar_served = on_nar_served  # Callback: (hash, name, size) -> None
 
     async def accept(self, conn: iroh.Connection):
         """Handle incoming NAR request with length-prefixed protocol."""
@@ -183,6 +195,26 @@ class NarProtocol(iroh.ProtocolHandler):
 
             logger.info(f"NAR sent: {nar_size} bytes to {remote_id[:16] if remote_id else 'unknown'}")
 
+            # Track served NAR
+            if self.on_nar_served:
+                # Extract hash and name from URL (format: base64-encoded store path)
+                hash_part = "?"
+                name = ""
+                try:
+                    import base64
+                    # URL might be base64-encoded store path
+                    if url.endswith(".nar"):
+                        url = url[:-4]
+                    decoded = base64.b64decode(url.replace("_", "/")).decode("utf-8")
+                    # /nix/store/xxxxx-name -> extract hash and name
+                    basename = decoded.split("/")[-1]
+                    hash_part = basename[:32] if len(basename) > 32 else basename
+                    if len(basename) > 33 and basename[32] == "-":
+                        name = basename[33:]
+                except:
+                    pass
+                self.on_nar_served(hash_part, name, nar_size)
+
         except Exception as e:
             logger.error(f"Error handling NAR request from {remote_id[:16] if remote_id else 'unknown'}: {e}")
 
@@ -194,11 +226,12 @@ class NarProtocol(iroh.ProtocolHandler):
 class NarProtocolCreator(iroh.ProtocolCreator):
     """Factory for NarProtocol."""
 
-    def __init__(self, local_store):
+    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
         self.local_store = local_store
+        self.on_nar_served = on_nar_served
 
     def create(self, endpoint) -> iroh.ProtocolHandler:
-        return NarProtocol(self.local_store)
+        return NarProtocol(self.local_store, self.on_nar_served)
 
 
 class IrohNode:
@@ -215,7 +248,9 @@ class IrohNode:
     """
 
     def __init__(self, local_store, tracker_url: str = None, peer_id: str = None,
-                 connect_timeout: float = 10.0, state_dir: t.Optional[Path] = None):
+                 connect_timeout: float = 10.0, state_dir: t.Optional[Path] = None,
+                 on_served: t.Optional[t.Callable[[str, str], None]] = None,
+                 on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
         self.local_store = local_store
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID
@@ -231,6 +266,12 @@ class IrohNode:
         self._known_peers: t.Dict[str, iroh.NodeAddr] = {}
         # HTTP client for tracker communication
         self._http_client: t.Optional[httpx.AsyncClient] = None
+        # Connection pool: (node_id, protocol) -> Connection
+        self._connection_pool: t.Dict[t.Tuple[str, bytes], iroh.Connection] = {}
+        self._pool_lock = asyncio.Lock()
+        # Tracking callbacks
+        self._on_served = on_served  # Called when narinfo served: (hash, name)
+        self._on_nar_served = on_nar_served  # Called when NAR served: (hash, name, size)
 
     async def start(self):
         """Start the Iroh node with persistent identity."""
@@ -239,10 +280,10 @@ class IrohNode:
         # Set the event loop for iroh FFI callbacks
         iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
 
-        # Set up protocol handlers
+        # Set up protocol handlers with tracking callbacks
         protocols = {
-            NARINFO_PROTOCOL: NarinfoProtocolCreator(self.local_store),
-            NAR_PROTOCOL: NarProtocolCreator(self.local_store),
+            NARINFO_PROTOCOL: NarinfoProtocolCreator(self.local_store, self._on_served),
+            NAR_PROTOCOL: NarProtocolCreator(self.local_store, self._on_nar_served),
         }
 
         # Load or create persistent secret key
@@ -358,6 +399,37 @@ class IrohNode:
             logger.warning(f"Connection to {node_id[:16]}... timed out")
             raise
 
+    async def get_pooled_connection(self, node_id: str, protocol: bytes = NAR_PROTOCOL,
+                                     timeout: float = None) -> iroh.Connection:
+        """
+        Get a connection from the pool, or create a new one.
+
+        Connection pooling reduces overhead for multiple requests to the same peer.
+        """
+        pool_key = (node_id, protocol)
+
+        async with self._pool_lock:
+            # Check if we have a cached connection
+            if pool_key in self._connection_pool:
+                conn = self._connection_pool[pool_key]
+                # TODO: Check if connection is still valid
+                # For now, just return it
+                logger.debug(f"Reusing pooled connection to {node_id[:16]}...")
+                return conn
+
+            # Create new connection
+            conn = await self.connect(node_id, protocol, timeout)
+            self._connection_pool[pool_key] = conn
+            logger.debug(f"Created new pooled connection to {node_id[:16]}...")
+            return conn
+
+    def _remove_pooled_connection(self, node_id: str, protocol: bytes = NAR_PROTOCOL):
+        """Remove a failed connection from the pool."""
+        pool_key = (node_id, protocol)
+        if pool_key in self._connection_pool:
+            del self._connection_pool[pool_key]
+            logger.debug(f"Removed failed connection from pool: {node_id[:16]}...")
+
     async def fetch_narinfo(self, node_id: str, nar_hash: str) -> t.Optional[str]:
         """Fetch narinfo from a peer."""
         try:
@@ -441,6 +513,87 @@ class IrohNode:
             yield chunk
 
         logger.info(f"NAR fetch complete: {bytes_received}/{expected_size} bytes from {node_id[:16]}...")
+
+    async def fetch_nar_buffered(self, node_id: str, url: str,
+                                  max_retries: int = 3,
+                                  read_timeout: float = 120.0) -> bytes:
+        """
+        Fetch NAR data from a peer, buffering entirely before returning.
+
+        This allows retry on failure before the HTTP response starts.
+        Uses connection pooling and retries on transient errors.
+
+        Args:
+            node_id: Peer node ID
+            url: NAR URL to fetch
+            max_retries: Maximum retry attempts
+            read_timeout: Timeout for read operations
+
+        Returns:
+            Complete NAR data as bytes
+
+        Raises:
+            RuntimeError: If all retries fail
+        """
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                # Use pooled connection
+                conn = await self.get_pooled_connection(node_id, NAR_PROTOCOL)
+
+                # Open bidirectional stream on the connection
+                bi = await conn.open_bi()
+                send = bi.send()
+                recv = bi.recv()
+
+                # Send URL request
+                await send.write_all(url.encode('utf-8'))
+                await send.finish()
+
+                logger.info(f"Fetching NAR (attempt {attempt + 1}/{max_retries}) from {node_id[:16]}... for {url}")
+
+                # Read 8-byte length header
+                size_data = await asyncio.wait_for(
+                    recv.read_exact(8),
+                    timeout=read_timeout
+                )
+                expected_size = int.from_bytes(size_data, 'big')
+                logger.info(f"NAR size: {expected_size} bytes from {node_id[:16]}...")
+
+                # Pre-allocate buffer and read all data
+                chunks = []
+                bytes_received = 0
+
+                while bytes_received < expected_size:
+                    chunk = await asyncio.wait_for(
+                        recv.read(65536),
+                        timeout=read_timeout
+                    )
+                    if not chunk:
+                        raise RuntimeError(f"Stream ended after {bytes_received}/{expected_size} bytes")
+                    chunks.append(chunk)
+                    bytes_received += len(chunk)
+                    if bytes_received % 1000000 < 65536:  # Log every ~1MB
+                        logger.info(f"NAR progress: {bytes_received}/{expected_size} bytes")
+
+                nar_data = b''.join(chunks)
+                logger.info(f"NAR fetch complete: {len(nar_data)} bytes from {node_id[:16]}...")
+                return nar_data
+
+            except Exception as e:
+                last_error = e
+                logger.warning(f"NAR fetch attempt {attempt + 1}/{max_retries} failed: {e}")
+                # Remove failed connection from pool
+                self._remove_pooled_connection(node_id, NAR_PROTOCOL)
+
+                if attempt < max_retries - 1:
+                    # Wait before retry with exponential backoff
+                    wait_time = 0.5 * (2 ** attempt)
+                    logger.info(f"Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+
+        raise RuntimeError(f"Failed to fetch NAR after {max_retries} attempts: {last_error}")
 
     async def fetch_narinfo_from_peers(self, nar_hash: str,
                                        max_attempts: int = 3) -> t.Optional[t.Tuple[str, str]]:
