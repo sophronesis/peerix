@@ -52,9 +52,12 @@
 - [ ] Consider caching compressed NARs for frequently requested packages
 
 ### 9. Iroh Streaming Reliability
-- [ ] Investigate IrohError during NAR streaming (connection drops mid-transfer)
-- [ ] Add retry logic for failed NAR fetches
+- [x] Investigate IrohError during NAR streaming (connection drops mid-transfer)
+  - Root cause: Iroh stream read() fails before all data arrives when sender calls finish() too quickly
+  - Fix: Added 100ms delay before send.finish() to let buffers flush
+- [x] Add retry logic for failed NAR fetches (with timeout and 3 retries)
 - [ ] Consider chunked transfers with resume capability
+- [ ] Report upstream bug to Iroh team about stream truncation
 
 ## Completed
 - [x] Persistent node identity (Ed25519 secret key)
