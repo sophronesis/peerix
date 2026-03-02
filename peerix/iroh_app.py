@@ -586,18 +586,22 @@ async def iroh_nar_handler(request: Request) -> Response:
 
     logger.info(f"Fetching NAR from peer {peer_id[:16]}...: {nar_path}")
 
-    try:
-        async def stream_from_peer():
+    async def stream_from_peer():
+        """Stream NAR from peer with error logging."""
+        bytes_streamed = 0
+        try:
             async for chunk in _iroh_node.fetch_nar(peer_id, nar_path):
+                bytes_streamed += len(chunk)
                 yield chunk
+            logger.info(f"HTTP stream complete: {bytes_streamed} bytes for {nar_path}")
+        except asyncio.TimeoutError:
+            logger.error(f"HTTP stream timeout after {bytes_streamed} bytes for {nar_path}")
+            raise
+        except Exception as e:
+            logger.error(f"HTTP stream error after {bytes_streamed} bytes: {e}")
+            raise
 
-        return StreamingResponse(stream_from_peer(), media_type="application/x-nix-nar")
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout fetching NAR from {peer_id[:16]}...")
-        return Response("Peer timeout", status_code=504)
-    except Exception as e:
-        logger.error(f"Error fetching NAR from peer: {e}")
-        return Response(f"Error: {e}", status_code=502)
+    return StreamingResponse(stream_from_peer(), media_type="application/x-nix-nar")
 
 
 async def status_handler(request: Request) -> Response:

@@ -400,22 +400,27 @@ class IrohNode:
 
                 # Stream response with timeout on each read
                 bytes_received = 0
+                read_count = 0
+                logger.info(f"Starting NAR stream from {node_id[:16]}... for {url}")
                 while True:
                     try:
                         chunk = await asyncio.wait_for(
                             recv.read(65536),
                             timeout=read_timeout
                         )
+                        read_count += 1
                         if not chunk:
+                            logger.info(f"NAR stream end signal (empty read) after {read_count} reads, {bytes_received} bytes from {node_id[:16]}...")
                             break
                         bytes_received += len(chunk)
+                        logger.debug(f"NAR read #{read_count}: {len(chunk)} bytes (total: {bytes_received})")
                         yield chunk
                     except asyncio.TimeoutError:
-                        logger.warning(f"Read timeout after {bytes_received} bytes from {node_id[:16]}...")
+                        logger.warning(f"Read timeout after {bytes_received} bytes ({read_count} reads) from {node_id[:16]}...")
                         raise
 
                 # Success - exit the retry loop
-                logger.debug(f"NAR fetch complete: {bytes_received} bytes from {node_id[:16]}...")
+                logger.info(f"NAR fetch complete: {bytes_received} bytes in {read_count} reads from {node_id[:16]}...")
                 return
 
             except asyncio.TimeoutError as e:
