@@ -417,17 +417,18 @@ class IrohNode:
                 expected_size = int.from_bytes(size_data, 'big')
                 logger.info(f"NAR size: {expected_size} bytes from {node_id[:16]}...")
 
-                # Read exactly expected_size bytes
+                # Read until we have expected_size bytes
                 while bytes_received < expected_size:
-                    remaining = expected_size - bytes_received
-                    chunk_size = min(65536, remaining)
                     chunk = await asyncio.wait_for(
-                        recv.read_exact(chunk_size),
+                        recv.read(65536),
                         timeout=read_timeout
                     )
+                    if not chunk:
+                        # Stream ended early
+                        raise RuntimeError(f"Stream ended after {bytes_received}/{expected_size} bytes")
                     bytes_received += len(chunk)
                     if bytes_received % 500000 < 65536:  # Log every ~500KB
-                        logger.debug(f"NAR progress: {bytes_received}/{expected_size} bytes")
+                        logger.info(f"NAR progress: {bytes_received}/{expected_size} bytes")
                     yield chunk
 
                 logger.info(f"NAR fetch complete: {bytes_received}/{expected_size} bytes from {node_id[:16]}...")
@@ -454,7 +455,7 @@ class IrohNode:
                 else:
                     logger.error(
                         f"NAR fetch failed after {max_retries + 1} attempts: "
-                        f"[{err_type}] {e} (last attempt received {bytes_received} bytes in {read_count} reads)"
+                        f"[{err_type}] {e} (received {bytes_received}/{expected_size} bytes)"
                     )
                     raise
 
