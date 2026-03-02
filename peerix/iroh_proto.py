@@ -413,7 +413,8 @@ class IrohNode:
                             logger.info(f"NAR stream end signal (empty read) after {read_count} reads, {bytes_received} bytes from {node_id[:16]}...")
                             break
                         bytes_received += len(chunk)
-                        logger.debug(f"NAR read #{read_count}: {len(chunk)} bytes (total: {bytes_received})")
+                        if read_count <= 3 or read_count % 10 == 0:
+                            logger.info(f"NAR read #{read_count}: {len(chunk)} bytes (total: {bytes_received})")
                         yield chunk
                     except asyncio.TimeoutError:
                         logger.warning(f"Read timeout after {bytes_received} bytes ({read_count} reads) from {node_id[:16]}...")
@@ -434,11 +435,18 @@ class IrohNode:
 
             except Exception as e:
                 last_error = e
+                err_type = type(e).__name__
                 if attempt < max_retries:
-                    logger.warning(f"NAR fetch error (attempt {attempt + 1}/{max_retries + 1}): {e}, retrying...")
+                    logger.warning(
+                        f"NAR fetch error (attempt {attempt + 1}/{max_retries + 1}): "
+                        f"[{err_type}] {e} (received {bytes_received} bytes in {read_count} reads), retrying..."
+                    )
                     await asyncio.sleep(0.5)
                 else:
-                    logger.error(f"NAR fetch failed after {max_retries + 1} attempts: {e}")
+                    logger.error(
+                        f"NAR fetch failed after {max_retries + 1} attempts: "
+                        f"[{err_type}] {e} (last attempt received {bytes_received} bytes in {read_count} reads)"
+                    )
                     raise
 
     async def fetch_narinfo_from_peers(self, nar_hash: str,
