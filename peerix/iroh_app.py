@@ -127,20 +127,56 @@ _store_manager: t.Optional["StoreManager"] = None
 # Cache for IP -> country code lookups
 _ip_country_cache: t.Dict[str, str] = {}
 
-# Track most requested derivations (hash -> count)
-_request_counts: t.Dict[str, int] = {}
+# Track most requested derivations (hash -> {count, name})
+_request_counts: t.Dict[str, t.Dict[str, t.Any]] = {}
+
+# Track most served derivations to peers (hash -> {count, name})
+_served_counts: t.Dict[str, t.Dict[str, t.Any]] = {}
 
 # Activity log (recent checks and downloads)
 _activity_log: t.List[t.Dict[str, t.Any]] = []
 _activity_log_max = 50  # Keep last 50 entries
 
 
-def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0):
+def _extract_drv_name(store_path: str) -> str:
+    """Extract derivation name from store path like /nix/store/xxxxx-name."""
+    if not store_path:
+        return ""
+    # Extract the part after hash: /nix/store/xxxxx-name -> name
+    basename = store_path.split("/")[-1]
+    # Remove hash prefix (32 chars + dash)
+    if len(basename) > 33 and basename[32] == "-":
+        return basename[33:]
+    return basename
+
+
+def _track_request(hash_part: str, name: str = ""):
+    """Track a request for a derivation."""
+    if hash_part not in _request_counts:
+        _request_counts[hash_part] = {"count": 0, "name": name}
+    _request_counts[hash_part]["count"] += 1
+    # Update name if we have a better one
+    if name and not _request_counts[hash_part]["name"]:
+        _request_counts[hash_part]["name"] = name
+
+
+def _track_served(hash_part: str, name: str = ""):
+    """Track a package served to a peer."""
+    if hash_part not in _served_counts:
+        _served_counts[hash_part] = {"count": 0, "name": name}
+    _served_counts[hash_part]["count"] += 1
+    # Update name if we have a better one
+    if name and not _served_counts[hash_part]["name"]:
+        _served_counts[hash_part]["name"] = name
+
+
+def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0, name: str = ""):
     """Log an activity (check or download)."""
     _activity_log.append({
         "time": time.time(),
         "action": action,  # "check" or "download"
         "hash": hash_part,
+        "name": name,  # Derivation name (e.g., "python-3.12")
         "source": source,  # "local", "peer:xxxx", "miss"
         "success": success,
         "size": size,
@@ -642,16 +678,15 @@ async def narinfo_handler(request: Request) -> Response:
     if hash_part.endswith(".narinfo"):
         hash_part = hash_part[:-8]
 
-    # Track request counts
-    _request_counts[hash_part] = _request_counts.get(hash_part, 0) + 1
-
     logger.debug(f"Narinfo request for {hash_part}")
 
     # Try local store first
     narinfo = await _local_store.narinfo(hash_part)
     if narinfo:
         logger.debug(f"Found locally: {narinfo.storePath}")
-        _log_activity("check", hash_part, "local", True)
+        drv_name = _extract_drv_name(narinfo.storePath)
+        _track_request(hash_part, drv_name)
+        _log_activity("check", hash_part, "local", True, name=drv_name)
         # Sign the narinfo before returning
         signed_narinfo = sign_narinfo(narinfo)
         return Response(signed_narinfo.dump(), media_type="text/x-nix-narinfo")
@@ -662,14 +697,17 @@ async def narinfo_handler(request: Request) -> Response:
         if result:
             narinfo_content, peer_id = result
             logger.info(f"Got narinfo from peer {peer_id[:16]}...")
-            _log_activity("check", hash_part, f"peer:{peer_id[:8]}", True)
             # Parse the narinfo and rewrite URL to route through our Iroh endpoint
             peer_narinfo = NarInfo.parse(narinfo_content)
+            drv_name = _extract_drv_name(peer_narinfo.storePath)
+            _track_request(hash_part, drv_name)
+            _log_activity("check", hash_part, f"peer:{peer_id[:8]}", True, name=drv_name)
             # Rewrite URL: original URL -> /iroh/nar/{peer_id}/{original_url}
             new_url = f"iroh/nar/{peer_id}/{peer_narinfo.url}"
             rewritten_narinfo = peer_narinfo._replace(url=new_url)
             return Response(rewritten_narinfo.dump(), media_type="text/x-nix-narinfo")
 
+    _track_request(hash_part)
     _log_activity("check", hash_part, "miss", False)
     return Response("Not found", status_code=404)
 
@@ -682,6 +720,9 @@ async def local_narinfo_handler(request: Request) -> Response:
 
     narinfo = await _local_store.narinfo(hash_part)
     if narinfo:
+        # Track as served to peer
+        drv_name = _extract_drv_name(narinfo.storePath)
+        _track_served(hash_part, drv_name)
         # Sign the narinfo before returning
         signed_narinfo = sign_narinfo(narinfo)
         return Response(signed_narinfo.dump(), media_type="text/x-nix-narinfo")
@@ -691,8 +732,14 @@ async def local_narinfo_handler(request: Request) -> Response:
 async def nar_handler(request: Request) -> Response:
     """Handle NAR requests - stream from local store."""
     nar_path = request.path_params.get("path", "")
-    # Extract hash from path (format: nar/xxx-name.nar or similar)
-    hash_part = nar_path.split("/")[-1].split("-")[0] if nar_path else "?"
+    # Extract hash and name from path (format: nar/xxxxx-name.nar or similar)
+    filename = nar_path.split("/")[-1] if nar_path else ""
+    hash_part = filename.split("-")[0] if filename else "?"
+    # Extract name: xxxxx-foo-bar.nar -> foo-bar
+    drv_name = ""
+    if "-" in filename:
+        name_part = filename.split("-", 1)[1]  # Everything after first dash
+        drv_name = name_part.rsplit(".", 1)[0] if "." in name_part else name_part
 
     try:
         async def stream_nar():
@@ -700,15 +747,15 @@ async def nar_handler(request: Request) -> Response:
             async for chunk in _local_store.nar(nar_path):
                 total_bytes += len(chunk)
                 yield chunk
-            _log_activity("download", hash_part, "local", True, total_bytes)
+            _log_activity("download", hash_part, "local", True, total_bytes, name=drv_name)
 
         return StreamingResponse(stream_nar(), media_type="application/x-nix-nar")
     except FileNotFoundError:
-        _log_activity("download", hash_part, "local", False)
+        _log_activity("download", hash_part, "local", False, name=drv_name)
         return Response("Not found", status_code=404)
     except Exception as e:
         logger.error(f"NAR error: {e}")
-        _log_activity("download", hash_part, "local", False)
+        _log_activity("download", hash_part, "local", False, name=drv_name)
         return Response("Internal error", status_code=500)
 
 
@@ -731,8 +778,14 @@ async def iroh_nar_handler(request: Request) -> Response:
         return Response("Iroh node not available", status_code=503)
 
     logger.info(f"Fetching NAR from peer {peer_id[:16]}...: {nar_path}")
-    # Extract hash from path
-    hash_part = nar_path.split("/")[-1].split("-")[0] if nar_path else "?"
+    # Extract hash and name from path
+    filename = nar_path.split("/")[-1] if nar_path else ""
+    hash_part = filename.split("-")[0] if filename else "?"
+    # Extract name: xxxxx-foo-bar.nar -> foo-bar
+    drv_name = ""
+    if "-" in filename:
+        name_part = filename.split("-", 1)[1]  # Everything after first dash
+        drv_name = name_part.rsplit(".", 1)[0] if "." in name_part else name_part
 
     async def stream_from_peer():
         """Stream NAR from peer with error logging."""
@@ -742,14 +795,14 @@ async def iroh_nar_handler(request: Request) -> Response:
                 bytes_streamed += len(chunk)
                 yield chunk
             logger.info(f"HTTP stream complete: {bytes_streamed} bytes for {nar_path}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, bytes_streamed)
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, bytes_streamed, name=drv_name)
         except asyncio.TimeoutError:
             logger.error(f"HTTP stream timeout after {bytes_streamed} bytes for {nar_path}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed)
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed, name=drv_name)
             raise
         except Exception as e:
             logger.error(f"HTTP stream error after {bytes_streamed} bytes: {e}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed)
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed, name=drv_name)
             raise
 
     return StreamingResponse(stream_from_peer(), media_type="application/x-nix-nar")
@@ -906,9 +959,28 @@ async def dashboard_stats_handler(request: Request) -> Response:
             pass
 
     # Add most requested derivations (top 10)
-    sorted_requests = sorted(_request_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    stats["most_requested"] = [{"hash": h, "count": c} for h, c in sorted_requests]
-    stats["total_requests"] = sum(_request_counts.values())
+    sorted_requests = sorted(
+        _request_counts.items(),
+        key=lambda x: x[1]["count"],
+        reverse=True
+    )[:10]
+    stats["most_requested"] = [
+        {"hash": h, "count": info["count"], "name": info.get("name", "")}
+        for h, info in sorted_requests
+    ]
+    stats["total_requests"] = sum(info["count"] for info in _request_counts.values())
+
+    # Add most served derivations to peers (top 10)
+    sorted_served = sorted(
+        _served_counts.items(),
+        key=lambda x: x[1]["count"],
+        reverse=True
+    )[:10]
+    stats["most_served"] = [
+        {"hash": h, "count": info["count"], "name": info.get("name", "")}
+        for h, info in sorted_served
+    ]
+    stats["total_served"] = sum(info["count"] for info in _served_counts.values())
 
     # Add activity log (most recent first)
     stats["activity"] = list(reversed(_activity_log[-20:]))
@@ -1100,6 +1172,14 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             <div class="peers-list" id="most-requested" style="margin-top: 12px;"></div>
         </div>
         <div class="card">
+            <h2>Most Served</h2>
+            <div class="status-row">
+                <span class="status-label">Total Served</span>
+                <span class="value" id="total-served">0</span>
+            </div>
+            <div class="peers-list" id="most-served" style="margin-top: 12px;"></div>
+        </div>
+        <div class="card">
             <h2>Activity Log</h2>
             <div class="peers-list" id="activity-log" style="max-height: 300px;"></div>
         </div>
@@ -1240,8 +1320,21 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 for (const item of (stats.most_requested || [])) {
                     const div = document.createElement('div');
                     div.className = 'peer-item';
-                    div.innerHTML = `<span style="color:#00d9ff">${item.count}</span> <span style="color:#888">${item.hash}</span>`;
+                    const nameStr = item.name ? `<span style="color:#00ff88">${item.name}</span>` : '';
+                    div.innerHTML = `<span style="color:#00d9ff">${item.count}</span> <span style="color:#888">${item.hash}</span> ${nameStr}`;
                     mostRequested.appendChild(div);
+                }
+
+                // Most served derivations
+                document.getElementById('total-served').textContent = (stats.total_served || 0).toLocaleString();
+                const mostServed = document.getElementById('most-served');
+                mostServed.innerHTML = '';
+                for (const item of (stats.most_served || [])) {
+                    const div = document.createElement('div');
+                    div.className = 'peer-item';
+                    const nameStr = item.name ? `<span style="color:#00ff88">${item.name}</span>` : '';
+                    div.innerHTML = `<span style="color:#9b59b6">${item.count}</span> <span style="color:#888">${item.hash}</span> ${nameStr}`;
+                    mostServed.appendChild(div);
                 }
 
                 // Activity log
@@ -1254,7 +1347,8 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     const icon = item.action === 'check' ? '🔍' : '📦';
                     const color = item.success ? '#00ff88' : '#ff4444';
                     const sizeStr = item.size > 0 ? ` (${(item.size/1024).toFixed(1)}KB)` : '';
-                    div.innerHTML = `<span style="color:#666">${timeStr}</span> ${icon} <span style="color:${color}">${item.source}</span> <span style="color:#888">${item.hash}</span>${sizeStr}`;
+                    const nameStr = item.name ? `<span style="color:#00ff88">${item.name}</span> ` : '';
+                    div.innerHTML = `<span style="color:#666">${timeStr}</span> ${icon} <span style="color:${color}">${item.source}</span> ${nameStr}<span style="color:#888">${item.hash}</span>${sizeStr}`;
                     activityLog.appendChild(div);
                 }
 
