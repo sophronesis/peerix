@@ -80,11 +80,12 @@ in
       };
 
       mode = lib.mkOption {
-        type = types.enum [ "lan" "ipfs" ];
-        default = "ipfs";
+        type = types.enum [ "lan" "ipfs" "iroh" ];
+        default = "iroh";
         description = ''
           Discovery mode:
-          - ipfs: IPFS-based P2P (requires services.kubo.enable) [default]
+          - iroh: Iroh-based P2P with NAT traversal (default)
+          - ipfs: IPFS-based P2P (requires services.kubo.enable)
           - lan: UDP broadcast for local network discovery
         '';
       };
@@ -392,8 +393,8 @@ in
   };
 
   config = lib.mkMerge [
-    # Low-bandwidth mode defaults
-    (lib.mkIf (cfg.enable && cfg.ipfs.lowBandwidth) {
+    # Low-bandwidth mode defaults (only for ipfs mode)
+    (lib.mkIf (cfg.enable && cfg.mode == "ipfs" && cfg.ipfs.lowBandwidth) {
       services.peerix.ipfs = {
         enableQUIC = lib.mkDefault false;
         connMgr.lowWater = lib.mkDefault 2;
@@ -462,25 +463,37 @@ in
         # Enable reload support
         reloadIfChanged = true;
         script = let
-          modeArgs = "--mode ${cfg.mode}";
-          trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
-          scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
-          concurrencyArgs = "--ipfs-concurrency ${toString cfg.ipfsConcurrency}";
-          priorityArgs = "--priority ${toString cfg.priority}";
-          filterModeArgs = "--filter-mode ${cfg.filterMode}";
-          homeostasisArgs = lib.optionalString cfg.homeostasis.enable
-            "--homeostasis --homeostasis-min-peers ${toString cfg.homeostasis.minPeers} --homeostasis-max-peers ${toString cfg.homeostasis.maxPeers}";
-        in ''
-          export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
-          exec ${cfg.package}/bin/peerix \
-            ${modeArgs} \
-            ${trackerArgs} \
-            ${scanIntervalArgs} \
-            ${concurrencyArgs} \
-            ${priorityArgs} \
-            ${filterModeArgs} \
-            ${homeostasisArgs}
-        '';
+          # Iroh mode uses a different entry point
+          irohScript = ''
+            export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
+            exec ${cfg.package}/bin/peerix-iroh \
+              --port 12304 \
+              ${lib.optionalString (cfg.trackerUrl != null) "--tracker ${cfg.trackerUrl}"} \
+              --priority ${toString cfg.priority} \
+              --state-dir /var/lib/peerix
+          '';
+          # Legacy modes (ipfs, lan)
+          legacyScript = let
+            modeArgs = "--mode ${cfg.mode}";
+            trackerArgs = lib.optionalString (cfg.trackerUrl != null) "--tracker-url ${cfg.trackerUrl}";
+            scanIntervalArgs = "--scan-interval ${toString cfg.scanInterval}";
+            concurrencyArgs = "--ipfs-concurrency ${toString cfg.ipfsConcurrency}";
+            priorityArgs = "--priority ${toString cfg.priority}";
+            filterModeArgs = "--filter-mode ${cfg.filterMode}";
+            homeostasisArgs = lib.optionalString cfg.homeostasis.enable
+              "--homeostasis --homeostasis-min-peers ${toString cfg.homeostasis.minPeers} --homeostasis-max-peers ${toString cfg.homeostasis.maxPeers}";
+          in ''
+            export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
+            exec ${cfg.package}/bin/peerix \
+              ${modeArgs} \
+              ${trackerArgs} \
+              ${scanIntervalArgs} \
+              ${concurrencyArgs} \
+              ${priorityArgs} \
+              ${filterModeArgs} \
+              ${homeostasisArgs}
+          '';
+        in if cfg.mode == "iroh" then irohScript else legacyScript;
       };
 
       # Path unit to watch for system rebuilds and trigger peerix rescan
@@ -526,8 +539,8 @@ in
       };
     })
 
-    # IPFS/Kubo configuration when ipfs.configureKubo is enabled
-    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.configureKubo) {
+    # IPFS/Kubo configuration when ipfs.configureKubo is enabled (only for ipfs mode)
+    (lib.mkIf (cfg.enable && cfg.mode == "ipfs" && cfg.ipfs.enable && cfg.ipfs.configureKubo) {
       services.kubo = {
         enable = true;
         settings = {
@@ -565,8 +578,8 @@ in
       systemd.services.peerix.wants = [ "ipfs.service" ];
     })
 
-    # Resource Manager limits file (only if any limit is explicitly set)
-    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.configureKubo && (
+    # Resource Manager limits file (only if any limit is explicitly set, only for ipfs mode)
+    (lib.mkIf (cfg.enable && cfg.mode == "ipfs" && cfg.ipfs.enable && cfg.ipfs.configureKubo && (
       cfg.ipfs.resourceMgr.connsInbound != null ||
       cfg.ipfs.resourceMgr.connsOutbound != null ||
       cfg.ipfs.resourceMgr.streamsInbound != null ||
@@ -592,8 +605,8 @@ in
       '';
     })
 
-    # IPFS rate limiting via iptables
-    (lib.mkIf (cfg.enable && cfg.ipfs.enable && cfg.ipfs.rateLimit.enable) {
+    # IPFS rate limiting via iptables (only for ipfs mode)
+    (lib.mkIf (cfg.enable && cfg.mode == "ipfs" && cfg.ipfs.enable && cfg.ipfs.rateLimit.enable) {
       networking.firewall.extraCommands = let
         rl = cfg.ipfs.rateLimit;
         connRate = toString rl.connectionRate;

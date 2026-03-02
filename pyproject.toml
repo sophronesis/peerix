@@ -26,6 +26,7 @@ libp2p = [
 [project.scripts]
 peerix = "peerix.__main__:run"
 peerix-tracker = "peerix.tracker_main:run"
+peerix-iroh = "peerix.iroh_app:main"
 
 [tool.setuptools]
 packages = ["peerix"]

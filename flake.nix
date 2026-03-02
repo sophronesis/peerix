@@ -95,6 +95,10 @@
             (pkgs.writeShellScriptBin "peerix-tracker" ''
               exec ${peerix-unwrapped}/bin/peerix-tracker "$@"
             '')
+            (pkgs.writeShellScriptBin "peerix-iroh" ''
+              PATH=${pkgs.nix}/bin:${pkgs.nix-serve}:$PATH
+              exec ${peerix-unwrapped}/bin/peerix-iroh "$@"
+            '')
           ];
         };
 
