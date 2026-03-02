@@ -114,7 +114,7 @@ FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
 
 # Version info
-PEERIX_VERSION = "0.0.2"
+PEERIX_VERSION = "0.0.3"
 # Git commit is passed via PEERIX_COMMIT env var at build time (from flake.nix)
 PEERIX_COMMIT = os.environ.get("PEERIX_COMMIT", "dev")
 
