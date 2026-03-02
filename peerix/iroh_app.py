@@ -127,6 +127,9 @@ _store_manager: t.Optional["StoreManager"] = None
 # Cache for IP -> country code lookups
 _ip_country_cache: t.Dict[str, str] = {}
 
+# Track most requested derivations (hash -> count)
+_request_counts: t.Dict[str, int] = {}
+
 
 class StoreManager:
     """
@@ -620,6 +623,9 @@ async def narinfo_handler(request: Request) -> Response:
     if hash_part.endswith(".narinfo"):
         hash_part = hash_part[:-8]
 
+    # Track request counts
+    _request_counts[hash_part] = _request_counts.get(hash_part, 0) + 1
+
     logger.debug(f"Narinfo request for {hash_part}")
 
     # Try local store first
@@ -865,6 +871,11 @@ async def dashboard_stats_handler(request: Request) -> Response:
         except:
             pass
 
+    # Add most requested derivations (top 10)
+    sorted_requests = sorted(_request_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    stats["most_requested"] = [{"hash": h, "count": c} for h, c in sorted_requests]
+    stats["total_requests"] = sum(_request_counts.values())
+
     return JSONResponse(stats)
 
 
@@ -1002,30 +1013,13 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         </div>
         <div class="card">
             <h2>Store</h2>
-            <div id="filter-progress" style="display: none; margin-bottom: 16px;">
-                <div class="status-row">
-                    <span class="status-label">Filtering</span>
-                    <span class="status-value"><span id="filter-checked">0</span> / <span id="filter-total">0</span></span>
-                </div>
-                <div class="progress-bar">
-                    <div class="fill" id="filter-bar" style="width: 0%"></div>
-                </div>
-                <div class="status-row" style="margin-top: 8px;">
-                    <span class="status-label">Found in cache.nixos.org</span>
-                    <span class="status-value success" id="filter-found">0</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">ETA</span>
-                    <span class="status-value" id="filter-eta">--</span>
-                </div>
+            <div class="status-row">
+                <span class="status-label">Available (in cache.nixos.org)</span>
+                <span class="value" id="available-hashes">--</span>
             </div>
             <div class="status-row">
                 <span class="status-label">Total Store Paths</span>
                 <span class="status-value" id="total-store-paths">--</span>
-            </div>
-            <div class="status-row">
-                <span class="status-label">Available (in cache.nixos.org)</span>
-                <span class="value" id="available-hashes">--</span>
             </div>
             <div class="status-row">
                 <span class="status-label">Skipped (not in cache)</span>
@@ -1039,9 +1033,34 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 <span class="status-label">Last Scan</span>
                 <span class="status-value" id="last-scan">--</span>
             </div>
+            <div id="filter-progress" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #0f3460;">
+                <div class="status-row">
+                    <span class="status-label">Filtering</span>
+                    <span class="status-value"><span id="filter-checked">0</span> / <span id="filter-total">0</span></span>
+                </div>
+                <div class="progress-bar">
+                    <div class="fill" id="filter-bar" style="width: 0%"></div>
+                </div>
+                <div class="status-row" style="margin-top: 8px;">
+                    <span class="status-label">Found</span>
+                    <span class="status-value success" id="filter-found">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="status-label">ETA</span>
+                    <span class="status-value" id="filter-eta">--</span>
+                </div>
+            </div>
             <div style="margin-top: 12px;">
                 <button class="ctrl-btn" id="scan-toggle" onclick="toggleScan()">Pause Scan</button>
             </div>
+        </div>
+        <div class="card">
+            <h2>Most Requested</h2>
+            <div class="status-row">
+                <span class="status-label">Total Requests</span>
+                <span class="value" id="total-requests">0</span>
+            </div>
+            <div class="peers-list" id="most-requested" style="margin-top: 12px;"></div>
         </div>
     </div>
     <script>
@@ -1171,6 +1190,17 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     } else {
                         filterProgress.style.display = 'none';
                     }
+                }
+
+                // Most requested derivations
+                document.getElementById('total-requests').textContent = (stats.total_requests || 0).toLocaleString();
+                const mostRequested = document.getElementById('most-requested');
+                mostRequested.innerHTML = '';
+                for (const item of (stats.most_requested || [])) {
+                    const div = document.createElement('div');
+                    div.className = 'peer-item';
+                    div.innerHTML = `<span style="color:#00d9ff">${item.count}</span> <span style="color:#888">${item.hash}</span>`;
+                    mostRequested.appendChild(div);
                 }
 
             } catch (e) {
