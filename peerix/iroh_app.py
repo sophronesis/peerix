@@ -56,17 +56,22 @@ class StoreManager:
         tracker_url: t.Optional[str] = None,
         peer_id: t.Optional[str] = None,
         state_file: str = DEFAULT_STATE_FILE,
+        nixpkgs_filter: t.Optional["NixpkgsFilteredStore"] = None,
+        filter_concurrency: int = 50,
     ):
         self.scan_interval = scan_interval
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id
         self._state_file = state_file
+        self._nixpkgs_filter = nixpkgs_filter
+        self._filter_concurrency = filter_concurrency
         self._available_hashes: t.Set[str] = set()
         self._last_announced_hashes: t.Set[str] = set()
         self._scan_progress: t.Dict[str, t.Any] = {
             "active": False,
             "total": 0,
             "scanned": 0,
+            "filtered": 0,
             "last_scan": None,
             "paused": False,
         }
@@ -114,6 +119,7 @@ class StoreManager:
         """Get current scan progress."""
         progress = self._scan_progress.copy()
         progress["announced_hashes"] = len(self._last_announced_hashes)
+        progress["filtering_enabled"] = self._nixpkgs_filter is not None
         return progress
 
     def pause(self):
@@ -202,28 +208,73 @@ class StoreManager:
             logger.warning(f"Batch register error: {e}")
             return False
 
+    async def _filter_hashes_batch(self, hashes: t.List[str]) -> t.Set[str]:
+        """
+        Filter hashes through NixpkgsFilteredStore.
+
+        Only returns hashes that exist in cache.nixos.org.
+        Uses semaphore for concurrency control.
+        """
+        if not self._nixpkgs_filter:
+            return set(hashes)
+
+        filtered: t.Set[str] = set()
+        semaphore = asyncio.Semaphore(self._filter_concurrency)
+        checked = 0
+
+        async def check_one(hsh: str) -> t.Optional[str]:
+            nonlocal checked
+            async with semaphore:
+                try:
+                    # Use the filter's _check_nixpkgs method
+                    if await self._nixpkgs_filter._check_nixpkgs(hsh):
+                        return hsh
+                    return None
+                finally:
+                    checked += 1
+                    if checked % 500 == 0:
+                        logger.debug(f"Checked {checked}/{len(hashes)} hashes...")
+
+        # Check all hashes concurrently
+        results = await asyncio.gather(*[check_one(h) for h in hashes])
+        filtered = {r for r in results if r is not None}
+
+        return filtered
+
     async def scan_once(self) -> int:
         """
         Perform a single store scan.
 
         Returns:
-            Number of hashes found
+            Number of hashes found (after filtering)
         """
         import time
 
         self._scan_progress["active"] = True
         self._scan_progress["scanned"] = 0
+        self._scan_progress["filtered"] = 0
 
         try:
             # scan_store_paths is synchronous but fast (just directory listing)
-            hashes = scan_store_paths(limit=0)
-            self._available_hashes = set(hashes)
-            self._scan_progress["total"] = len(hashes)
-            self._scan_progress["scanned"] = len(hashes)
-            self._scan_progress["last_scan"] = time.time()
+            all_hashes = scan_store_paths(limit=0)
+            self._scan_progress["total"] = len(all_hashes)
+            self._scan_progress["scanned"] = len(all_hashes)
 
-            logger.info(f"Store scan complete: {len(hashes)} paths available")
-            return len(hashes)
+            # Filter through NixpkgsFilteredStore if enabled
+            if self._nixpkgs_filter:
+                logger.info(f"Filtering {len(all_hashes)} hashes through cache.nixos.org...")
+                filtered_hashes = await self._filter_hashes_batch(all_hashes)
+                self._scan_progress["filtered"] = len(all_hashes) - len(filtered_hashes)
+                logger.info(
+                    f"Filtered: {len(filtered_hashes)}/{len(all_hashes)} hashes in cache.nixos.org"
+                )
+                self._available_hashes = filtered_hashes
+            else:
+                self._available_hashes = set(all_hashes)
+
+            self._scan_progress["last_scan"] = time.time()
+            logger.info(f"Store scan complete: {len(self._available_hashes)} paths available")
+            return len(self._available_hashes)
 
         finally:
             self._scan_progress["active"] = False
@@ -884,6 +935,7 @@ async def run_server(
                     scan_interval=scan_interval,
                     tracker_url=tracker_url,
                     peer_id=peer_id,
+                    nixpkgs_filter=_nixpkgs_filter,
                 )
                 # Do initial scan
                 await _store_manager.scan_once()
