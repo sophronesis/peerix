@@ -140,6 +140,7 @@ class NarProtocol(iroh.ProtocolHandler):
 
     async def accept(self, conn: iroh.Connection):
         """Handle incoming NAR request."""
+        remote_id = None
         try:
             remote_id = conn.remote_node_id()
             logger.debug(f"NAR request from {remote_id}")
@@ -152,19 +153,25 @@ class NarProtocol(iroh.ProtocolHandler):
             # Read the URL being requested
             url_data = await recv.read_to_end(1024)
             url = url_data.decode('utf-8').strip()
-            logger.debug(f"Streaming NAR for {url}")
+            logger.info(f"Streaming NAR for {url} to {remote_id[:16] if remote_id else 'unknown'}...")
 
-            # Stream NAR data
+            # Stream NAR data with progress logging
+            bytes_sent = 0
             try:
                 async for chunk in self.local_store.nar(url):
                     await send.write_all(chunk)
+                    bytes_sent += len(chunk)
                 await send.finish()
+                logger.info(f"NAR stream complete: {bytes_sent} bytes to {remote_id[:16] if remote_id else 'unknown'}")
             except Exception as e:
-                logger.error(f"Error streaming NAR: {e}")
-                await send.finish()
+                logger.error(f"Error streaming NAR after {bytes_sent} bytes: {e}")
+                try:
+                    await send.finish()
+                except:
+                    pass
 
         except Exception as e:
-            logger.error(f"Error handling NAR request: {e}")
+            logger.error(f"Error handling NAR request from {remote_id[:16] if remote_id else 'unknown'}: {e}")
 
     async def shutdown(self):
         """Clean up on shutdown."""
@@ -364,25 +371,70 @@ class IrohNode:
             logger.warning(f"Failed to fetch narinfo from {node_id}: {e}")
             return None
 
-    async def fetch_nar(self, node_id: str, url: str) -> t.AsyncIterator[bytes]:
-        """Fetch NAR data from a peer (streaming)."""
-        conn = await self.connect(node_id, NAR_PROTOCOL)
+    async def fetch_nar(self, node_id: str, url: str,
+                        read_timeout: float = 30.0,
+                        max_retries: int = 2) -> t.AsyncIterator[bytes]:
+        """
+        Fetch NAR data from a peer (streaming) with retry and timeout.
 
-        # Open bidirectional stream
-        bi = await conn.open_bi()
-        send = bi.send()
-        recv = bi.recv()
+        Args:
+            node_id: Peer node ID
+            url: NAR URL to fetch
+            read_timeout: Timeout for each read operation
+            max_retries: Number of retry attempts on failure
+        """
+        last_error = None
 
-        # Send URL request
-        await send.write_all(url.encode('utf-8'))
-        await send.finish()
+        for attempt in range(max_retries + 1):
+            try:
+                conn = await self.connect(node_id, NAR_PROTOCOL)
 
-        # Stream response
-        while True:
-            chunk = await recv.read(65536)
-            if not chunk:
-                break
-            yield chunk
+                # Open bidirectional stream
+                bi = await conn.open_bi()
+                send = bi.send()
+                recv = bi.recv()
+
+                # Send URL request
+                await send.write_all(url.encode('utf-8'))
+                await send.finish()
+
+                # Stream response with timeout on each read
+                bytes_received = 0
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            recv.read(65536),
+                            timeout=read_timeout
+                        )
+                        if not chunk:
+                            break
+                        bytes_received += len(chunk)
+                        yield chunk
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Read timeout after {bytes_received} bytes from {node_id[:16]}...")
+                        raise
+
+                # Success - exit the retry loop
+                logger.debug(f"NAR fetch complete: {bytes_received} bytes from {node_id[:16]}...")
+                return
+
+            except asyncio.TimeoutError as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(f"NAR fetch timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.error(f"NAR fetch failed after {max_retries + 1} attempts")
+                    raise
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.warning(f"NAR fetch error (attempt {attempt + 1}/{max_retries + 1}): {e}, retrying...")
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.error(f"NAR fetch failed after {max_retries + 1} attempts: {e}")
+                    raise
 
     async def fetch_narinfo_from_peers(self, nar_hash: str,
                                        max_attempts: int = 3) -> t.Optional[t.Tuple[str, str]]:
