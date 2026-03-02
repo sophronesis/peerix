@@ -385,8 +385,7 @@ class IrohNode:
             return None
 
     async def fetch_nar(self, node_id: str, url: str,
-                        read_timeout: float = 60.0,
-                        max_retries: int = 2) -> t.AsyncIterator[bytes]:
+                        read_timeout: float = 60.0) -> t.AsyncIterator[bytes]:
         """
         Fetch NAR data from a peer using length-prefixed protocol.
 
@@ -394,82 +393,54 @@ class IrohNode:
         1. Send URL request, finish send side
         2. Read 8-byte length header (expected NAR size)
         3. Read exactly that many bytes
-        4. Send ACK to confirm receipt
+
+        No retry logic - streaming generators can't retry without duplicating data.
+        Caller should handle failures.
 
         Args:
             node_id: Peer node ID
             url: NAR URL to fetch
-            read_timeout: Timeout for the entire transfer
-            max_retries: Number of retry attempts on failure
+            read_timeout: Timeout for read operations
         """
-        last_error = None
+        bytes_received = 0
+        expected_size = 0
 
-        for attempt in range(max_retries + 1):
-            bytes_received = 0
-            expected_size = 0
-            try:
-                conn = await self.connect(node_id, NAR_PROTOCOL)
+        conn = await self.connect(node_id, NAR_PROTOCOL)
 
-                # Open bidirectional stream
-                bi = await conn.open_bi()
-                send = bi.send()
-                recv = bi.recv()
+        # Open bidirectional stream
+        bi = await conn.open_bi()
+        send = bi.send()
+        recv = bi.recv()
 
-                # Send URL request
-                await send.write_all(url.encode('utf-8'))
-                await send.finish()
+        # Send URL request
+        await send.write_all(url.encode('utf-8'))
+        await send.finish()
 
-                logger.info(f"Fetching NAR from {node_id[:16]}... for {url}")
+        logger.info(f"Fetching NAR from {node_id[:16]}... for {url}")
 
-                # Read 8-byte length header
-                size_data = await asyncio.wait_for(
-                    recv.read_exact(8),
-                    timeout=read_timeout
-                )
-                expected_size = int.from_bytes(size_data, 'big')
-                logger.info(f"NAR size: {expected_size} bytes from {node_id[:16]}...")
+        # Read 8-byte length header
+        size_data = await asyncio.wait_for(
+            recv.read_exact(8),
+            timeout=read_timeout
+        )
+        expected_size = int.from_bytes(size_data, 'big')
+        logger.info(f"NAR size: {expected_size} bytes from {node_id[:16]}...")
 
-                # Read until we have expected_size bytes
-                while bytes_received < expected_size:
-                    chunk = await asyncio.wait_for(
-                        recv.read(65536),
-                        timeout=read_timeout
-                    )
-                    if not chunk:
-                        # Stream ended early
-                        raise RuntimeError(f"Stream ended after {bytes_received}/{expected_size} bytes")
-                    bytes_received += len(chunk)
-                    if bytes_received % 500000 < 65536:  # Log every ~500KB
-                        logger.info(f"NAR progress: {bytes_received}/{expected_size} bytes")
-                    yield chunk
+        # Read until we have expected_size bytes
+        while bytes_received < expected_size:
+            chunk = await asyncio.wait_for(
+                recv.read(65536),
+                timeout=read_timeout
+            )
+            if not chunk:
+                # Stream ended early
+                raise RuntimeError(f"Stream ended after {bytes_received}/{expected_size} bytes")
+            bytes_received += len(chunk)
+            if bytes_received % 500000 < 65536:  # Log every ~500KB
+                logger.info(f"NAR progress: {bytes_received}/{expected_size} bytes")
+            yield chunk
 
-                logger.info(f"NAR fetch complete: {bytes_received}/{expected_size} bytes from {node_id[:16]}...")
-                return
-
-            except asyncio.TimeoutError as e:
-                last_error = e
-                if attempt < max_retries:
-                    logger.warning(f"NAR fetch timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
-                    await asyncio.sleep(0.5)
-                else:
-                    logger.error(f"NAR fetch failed after {max_retries + 1} attempts")
-                    raise
-
-            except Exception as e:
-                last_error = e
-                err_type = type(e).__name__
-                if attempt < max_retries:
-                    logger.warning(
-                        f"NAR fetch error (attempt {attempt + 1}/{max_retries + 1}): "
-                        f"[{err_type}] {e} (received {bytes_received}/{expected_size} bytes), retrying..."
-                    )
-                    await asyncio.sleep(0.5)
-                else:
-                    logger.error(
-                        f"NAR fetch failed after {max_retries + 1} attempts: "
-                        f"[{err_type}] {e} (received {bytes_received}/{expected_size} bytes)"
-                    )
-                    raise
+        logger.info(f"NAR fetch complete: {bytes_received}/{expected_size} bytes from {node_id[:16]}...")
 
     async def fetch_narinfo_from_peers(self, nar_hash: str,
                                        max_attempts: int = 3) -> t.Optional[t.Tuple[str, str]]:
