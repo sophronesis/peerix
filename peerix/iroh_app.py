@@ -1056,6 +1056,9 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         async function toggleScan() {
             const endpoint = scanPaused ? '/scan/resume' : '/scan/pause';
             await fetch(endpoint, { method: 'POST' });
+            // Force refresh to show new state
+            lastDataHash = '';
+            await update();
         }
 
         function formatTime(ts) {
