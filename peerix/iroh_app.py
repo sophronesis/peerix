@@ -860,9 +860,9 @@ async def run_server(
         _local_store = serving_store
         logger.info("LocalStore ready")
 
-        # Start Iroh node
+        # Start Iroh node (use serving_store which has filtering/verification applied)
         _iroh_node = IrohNode(
-            store,
+            serving_store,
             tracker_url=tracker_url,
             peer_id=peer_id,
             connect_timeout=connect_timeout,
