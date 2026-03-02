@@ -9,6 +9,7 @@ import asyncio
 import logging
 import socket
 import signal
+import time
 import typing as t
 from pathlib import Path
 
@@ -21,6 +22,81 @@ import json
 import os
 
 import httpx
+
+
+class KalmanETA:
+    """
+    Kalman filter for ETA estimation based on processing rate.
+
+    Tracks the rate of items processed per second and provides
+    smoothed ETA estimates that adapt to changing conditions.
+    """
+
+    def __init__(self, process_noise: float = 0.1, measurement_noise: float = 0.5):
+        self._rate = 0.0  # items per second
+        self._variance = 1.0  # uncertainty
+        self._process_noise = process_noise
+        self._measurement_noise = measurement_noise
+        self._last_update = None
+        self._last_count = 0
+
+    def update(self, processed: int, total: int) -> t.Optional[float]:
+        """
+        Update filter with new measurement and return ETA in seconds.
+
+        Args:
+            processed: Number of items processed so far
+            total: Total number of items
+
+        Returns:
+            Estimated seconds remaining, or None if not enough data
+        """
+        now = time.time()
+
+        if self._last_update is None:
+            self._last_update = now
+            self._last_count = processed
+            return None
+
+        dt = now - self._last_update
+        if dt < 0.1:  # Too soon for meaningful update
+            if self._rate > 0:
+                remaining = total - processed
+                return remaining / self._rate
+            return None
+
+        # Measure current rate
+        items_done = processed - self._last_count
+        measured_rate = items_done / dt if dt > 0 else 0
+
+        # Kalman predict step
+        self._variance += self._process_noise
+
+        # Kalman update step
+        if measured_rate > 0 or self._rate > 0:
+            kalman_gain = self._variance / (self._variance + self._measurement_noise)
+            self._rate = self._rate + kalman_gain * (measured_rate - self._rate)
+            self._variance = (1 - kalman_gain) * self._variance
+
+        self._last_update = now
+        self._last_count = processed
+
+        # Calculate ETA
+        if self._rate > 0:
+            remaining = total - processed
+            return remaining / self._rate
+        return None
+
+    def format_eta(self, seconds: t.Optional[float]) -> str:
+        """Format ETA as human-readable string."""
+        if seconds is None:
+            return "calculating..."
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+        else:
+            return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
 
 from .local_asyncio import local_async, LocalStoreAsync
 from .iroh_proto import IrohNode, NARINFO_PROTOCOL
@@ -72,6 +148,9 @@ class StoreManager:
             "total": 0,
             "scanned": 0,
             "filtered": 0,
+            "filter_checked": 0,
+            "filter_found": 0,
+            "filter_eta": None,
             "last_scan": None,
             "paused": False,
         }
@@ -213,7 +292,7 @@ class StoreManager:
         Filter hashes through NixpkgsFilteredStore.
 
         Only returns hashes that exist in cache.nixos.org.
-        Uses semaphore for concurrency control.
+        Uses semaphore for concurrency control with Kalman ETA.
         """
         if not self._nixpkgs_filter:
             return set(hashes)
@@ -221,19 +300,39 @@ class StoreManager:
         filtered: t.Set[str] = set()
         semaphore = asyncio.Semaphore(self._filter_concurrency)
         checked = 0
+        found = 0
+        total = len(hashes)
+        eta = KalmanETA()
+        lock = asyncio.Lock()
 
         async def check_one(hsh: str) -> t.Optional[str]:
-            nonlocal checked
+            nonlocal checked, found
             async with semaphore:
                 try:
-                    # Use the filter's _check_nixpkgs method
-                    if await self._nixpkgs_filter._check_nixpkgs(hsh):
+                    exists = await self._nixpkgs_filter._check_nixpkgs(hsh)
+                    if exists:
                         return hsh
                     return None
                 finally:
-                    checked += 1
-                    if checked % 500 == 0:
-                        logger.debug(f"Checked {checked}/{len(hashes)} hashes...")
+                    async with lock:
+                        checked += 1
+                        if exists:
+                            found += 1
+
+                        # Update progress
+                        self._scan_progress["filter_checked"] = checked
+                        self._scan_progress["filter_found"] = found
+
+                        # Log with ETA every 1000 items
+                        if checked % 1000 == 0:
+                            eta_secs = eta.update(checked, total)
+                            eta_str = eta.format_eta(eta_secs)
+                            pct = (checked / total) * 100
+                            logger.info(
+                                f"Filtering: {checked}/{total} ({pct:.1f}%) "
+                                f"found={found} ETA={eta_str}"
+                            )
+                            self._scan_progress["filter_eta"] = eta_str
 
         # Check all hashes concurrently
         results = await asyncio.gather(*[check_one(h) for h in hashes])
@@ -248,11 +347,12 @@ class StoreManager:
         Returns:
             Number of hashes found (after filtering)
         """
-        import time
-
         self._scan_progress["active"] = True
         self._scan_progress["scanned"] = 0
         self._scan_progress["filtered"] = 0
+        self._scan_progress["filter_checked"] = 0
+        self._scan_progress["filter_found"] = 0
+        self._scan_progress["filter_eta"] = None
 
         try:
             # scan_store_paths is synchronous but fast (just directory listing)
@@ -283,6 +383,7 @@ class StoreManager:
         """Run periodic store scanning in background."""
         self._running = True
         logger.info(f"Starting periodic store scan (interval={self.scan_interval}s)")
+        first_run = True
 
         while self._running:
             # Check if paused
@@ -294,9 +395,15 @@ class StoreManager:
 
             try:
                 await self.scan_once()
+                # Delta sync after each scan
+                if self.tracker_url:
+                    await self.delta_sync_packages()
             except Exception as e:
                 logger.warning(f"Store scan failed: {e}")
 
+            # First scan runs immediately, then wait for interval
+            if first_run:
+                first_run = False
             await asyncio.sleep(self.scan_interval)
 
     async def run_periodic_delta_sync(self, interval: int = 300):
@@ -929,7 +1036,7 @@ async def run_server(
             logger.info(f"Relay: {addr.relay_url()}")
             logger.info(f"Direct addrs: {len(addr.direct_addresses())}")
 
-            # Initialize store manager for tracking available packages
+            # Initialize store manager for tracking available packages (non-blocking)
             if scan_interval > 0:
                 _store_manager = StoreManager(
                     scan_interval=scan_interval,
@@ -937,12 +1044,7 @@ async def run_server(
                     peer_id=peer_id,
                     nixpkgs_filter=_nixpkgs_filter,
                 )
-                # Do initial scan
-                await _store_manager.scan_once()
-                # Do initial delta sync
-                if tracker_url:
-                    await _store_manager.delta_sync_packages()
-                logger.info(f"Store manager initialized (scan_interval={scan_interval}s)")
+                logger.info(f"Store manager initialized (scan runs in background)")
 
             # Create and run HTTP server
             app = create_app()
@@ -959,15 +1061,14 @@ async def run_server(
             )
             server = uvicorn.Server(config)
 
-            # Run server, tracker sync, store scanning, and delta sync concurrently
+            # Run server, tracker sync, and store scanning concurrently
+            # (delta sync is now integrated into periodic scan)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(server.serve())
                 if tracker_url:
                     tg.create_task(_iroh_node.run_tracker_sync())
                 if _store_manager and scan_interval > 0:
                     tg.create_task(_store_manager.run_periodic_scan())
-                    if tracker_url:
-                        tg.create_task(_store_manager.run_periodic_delta_sync())
 
         except asyncio.CancelledError:
             logger.info("Shutting down...")
