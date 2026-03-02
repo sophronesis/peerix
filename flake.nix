@@ -85,18 +85,23 @@
           };
         };
 
-        peerix = pkgs.symlinkJoin {
+        peerix = let
+          gitCommit = self.shortRev or "dirty";
+        in pkgs.symlinkJoin {
           name = "peerix";
           paths = [
             (pkgs.writeShellScriptBin "peerix" ''
               PATH=${pkgs.nix}/bin:${pkgs.nix-serve}:$PATH
+              export PEERIX_COMMIT="${gitCommit}"
               exec ${peerix-unwrapped}/bin/peerix "$@"
             '')
             (pkgs.writeShellScriptBin "peerix-tracker" ''
+              export PEERIX_COMMIT="${gitCommit}"
               exec ${peerix-unwrapped}/bin/peerix-tracker "$@"
             '')
             (pkgs.writeShellScriptBin "peerix-iroh" ''
               PATH=${pkgs.nix}/bin:${pkgs.nix-serve}:$PATH
+              export PEERIX_COMMIT="${gitCommit}"
               exec ${peerix-unwrapped}/bin/peerix-iroh "$@"
             '')
           ];

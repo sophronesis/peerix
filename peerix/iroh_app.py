@@ -113,23 +113,8 @@ FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 
 # Version info
 PEERIX_VERSION = "0.0.2"
-
-def get_git_commit() -> str:
-    """Get short git commit hash if available."""
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-            cwd=os.path.dirname(__file__)
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except:
-        pass
-    return "unknown"
-
-PEERIX_COMMIT = get_git_commit()
+# Git commit is passed via PEERIX_COMMIT env var at build time (from flake.nix)
+PEERIX_COMMIT = os.environ.get("PEERIX_COMMIT", "dev")
 
 logger = logging.getLogger("peerix.iroh_app")
 
