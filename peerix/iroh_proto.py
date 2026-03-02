@@ -161,8 +161,10 @@ class NarProtocol(iroh.ProtocolHandler):
                 async for chunk in self.local_store.nar(url):
                     await send.write_all(chunk)
                     bytes_sent += len(chunk)
-                # Small delay before finish to let buffers flush
-                await asyncio.sleep(0.1)
+                # Delay before finish to let buffers flush
+                # Scale delay with data size: 100ms base + 50ms per MB
+                delay = 0.1 + (bytes_sent / 1_000_000) * 0.05
+                await asyncio.sleep(delay)
                 await send.finish()
                 logger.info(f"NAR stream complete: {bytes_sent} bytes to {remote_id[:16] if remote_id else 'unknown'}")
             except Exception as e:
