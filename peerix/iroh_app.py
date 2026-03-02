@@ -1053,7 +1053,7 @@ async def dashboard_stats_handler(request: Request) -> Response:
         reverse=True
     )[:10]
     stats["most_served"] = [
-        {"hash": h, "count": info["count"], "name": info.get("name", "")}
+        {"hash": h, "count": info["count"], "name": info.get("name", ""), "peers": info.get("peers", {})}
         for h, info in sorted_served
     ]
     stats["total_served"] = sum(info["count"] for info in _served_counts.values())
@@ -1409,7 +1409,13 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     const div = document.createElement('div');
                     div.className = 'peer-item';
                     const nameStr = item.name ? `<span style="color:#00ff88">${item.name}</span>` : '';
-                    div.innerHTML = `<span style="color:#9b59b6">${item.count}</span> <span style="color:#888">${item.hash}</span> ${nameStr}`;
+                    // Show peers who received this package
+                    let peersStr = '';
+                    if (item.peers && Object.keys(item.peers).length > 0) {
+                        const peerList = Object.entries(item.peers).map(([p, c]) => `${p}:${c}`).join(', ');
+                        peersStr = ` <span style="color:#9b59b6;font-size:10px">→ ${peerList}</span>`;
+                    }
+                    div.innerHTML = `<span style="color:#9b59b6">${item.count}</span> <span style="color:#888">${item.hash}</span> ${nameStr}${peersStr}`;
                     mostServed.appendChild(div);
                 }
 
@@ -1420,11 +1426,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     const div = document.createElement('div');
                     div.className = 'peer-item';
                     const timeStr = new Date(item.time * 1000).toLocaleTimeString();
-                    const icon = item.action === 'check' ? '🔍' : '📦';
+                    const icon = item.action === 'check' ? '🔍' : (item.action === 'served' ? '📤' : '📦');
                     const color = item.success ? '#00ff88' : '#ff4444';
                     const sizeStr = item.size > 0 ? ` (${(item.size/1024).toFixed(1)}KB)` : '';
                     const nameStr = item.name ? `<span style="color:#00ff88">${item.name}</span> ` : '';
-                    div.innerHTML = `<span style="color:#666">${timeStr}</span> ${icon} <span style="color:${color}">${item.source}</span> ${nameStr}<span style="color:#888">${item.hash}</span>${sizeStr}`;
+                    const peerStr = item.peer_id ? `<span style="color:#9b59b6">→${item.peer_id}</span> ` : '';
+                    div.innerHTML = `<span style="color:#666">${timeStr}</span> ${icon} <span style="color:${color}">${item.source}</span> ${peerStr}${nameStr}<span style="color:#888">${item.hash}</span>${sizeStr}`;
                     activityLog.appendChild(div);
                 }
 
