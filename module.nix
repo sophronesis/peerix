@@ -108,6 +108,16 @@ in
         '';
       };
 
+      filterConcurrency = lib.mkOption {
+        type = types.int;
+        default = 10;
+        description = ''
+          Maximum concurrent HTTP requests when filtering hashes against cache.nixos.org.
+          Lower values are gentler on your network but slower.
+          Default: 10.
+        '';
+      };
+
       # IPFS scan options
       scanInterval = lib.mkOption {
         type = types.int;
@@ -470,6 +480,7 @@ in
               --port 12304 \
               ${lib.optionalString (cfg.trackerUrl != null) "--tracker ${cfg.trackerUrl}"} \
               --priority ${toString cfg.priority} \
+              --filter-concurrency ${toString cfg.filterConcurrency} \
               --state-dir /var/lib/peerix
           '';
           # Legacy modes (ipfs, lan)

@@ -133,7 +133,7 @@ class StoreManager:
         peer_id: t.Optional[str] = None,
         state_file: str = DEFAULT_STATE_FILE,
         nixpkgs_filter: t.Optional["NixpkgsFilteredStore"] = None,
-        filter_concurrency: int = 50,
+        filter_concurrency: int = 10,
     ):
         self.scan_interval = scan_interval
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
@@ -945,6 +945,7 @@ async def run_server(
     filter_patterns: t.Optional[t.List[str]] = None,
     no_verify: bool = False,
     upstream_cache: str = "https://cache.nixos.org",
+    filter_concurrency: int = 10,
 ):
     """
     Run the Iroh-based peerix server.
@@ -963,6 +964,7 @@ async def run_server(
         filter_patterns: Additional filter patterns for rules mode
         no_verify: Disable hash verification against upstream cache
         upstream_cache: Upstream cache URL for verification
+        filter_concurrency: Max concurrent requests when filtering (default: 10)
     """
     global _iroh_node, _local_store, _cache_priority, _store_manager
     _cache_priority = priority
@@ -1043,8 +1045,9 @@ async def run_server(
                     tracker_url=tracker_url,
                     peer_id=peer_id,
                     nixpkgs_filter=_nixpkgs_filter,
+                    filter_concurrency=filter_concurrency,
                 )
-                logger.info(f"Store manager initialized (scan runs in background)")
+                logger.info(f"Store manager initialized (scan runs in background, concurrency={filter_concurrency})")
 
             # Create and run HTTP server
             app = create_app()
@@ -1117,6 +1120,8 @@ def main():
                         help="Disable hash verification against upstream cache")
     parser.add_argument("--upstream-cache", type=str, default="https://cache.nixos.org",
                         help="Upstream cache URL for verification (default: https://cache.nixos.org)")
+    parser.add_argument("--filter-concurrency", type=int, default=10,
+                        help="Max concurrent requests when filtering hashes (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
     args = parser.parse_args()
@@ -1142,6 +1147,7 @@ def main():
             filter_patterns=args.filter_patterns,
             no_verify=args.no_verify,
             upstream_cache=args.upstream_cache,
+            filter_concurrency=args.filter_concurrency,
         ))
     except KeyboardInterrupt:
         logger.info("Interrupted")
