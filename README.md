@@ -2,6 +2,7 @@ Peerix
 ======
 
 Peer-to-peer binary cache for Nix. Share derivations between machines via Iroh P2P or local network broadcast.
+Basically like torrent tracker, but for your `/nix/store/`
 
 Quick Start
 -----------
