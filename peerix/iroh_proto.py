@@ -82,9 +82,9 @@ class PeerInfo:
 class NarinfoProtocol(iroh.ProtocolHandler):
     """Protocol handler for narinfo requests."""
 
-    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str], None]] = None):
+    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str, str], None]] = None):
         self.local_store = local_store
-        self.on_served = on_served  # Callback: (hash, name) -> None
+        self.on_served = on_served  # Callback: (hash, name, peer_id) -> None
 
     async def accept(self, conn: iroh.Connection):
         """Handle incoming narinfo request."""
@@ -116,7 +116,7 @@ class NarinfoProtocol(iroh.ProtocolHandler):
                         basename = narinfo.storePath.split("/")[-1]
                         if len(basename) > 33 and basename[32] == "-":
                             name = basename[33:]
-                    self.on_served(nar_hash, name)
+                    self.on_served(nar_hash, name, remote_id or "")
             else:
                 response = b"NOTFOUND"
                 logger.debug(f"Narinfo not found for {nar_hash}")
@@ -135,7 +135,7 @@ class NarinfoProtocol(iroh.ProtocolHandler):
 class NarinfoProtocolCreator(iroh.ProtocolCreator):
     """Factory for NarinfoProtocol."""
 
-    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str], None]] = None):
+    def __init__(self, local_store, on_served: t.Optional[t.Callable[[str, str, str], None]] = None):
         self.local_store = local_store
         self.on_served = on_served
 
@@ -146,9 +146,9 @@ class NarinfoProtocolCreator(iroh.ProtocolCreator):
 class NarProtocol(iroh.ProtocolHandler):
     """Protocol handler for NAR streaming."""
 
-    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
+    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int, str], None]] = None):
         self.local_store = local_store
-        self.on_nar_served = on_nar_served  # Callback: (hash, name, size) -> None
+        self.on_nar_served = on_nar_served  # Callback: (hash, name, size, peer_id) -> None
 
     async def accept(self, conn: iroh.Connection):
         """Handle incoming NAR request with length-prefixed protocol."""
@@ -213,7 +213,7 @@ class NarProtocol(iroh.ProtocolHandler):
                         name = basename[33:]
                 except:
                     pass
-                self.on_nar_served(hash_part, name, nar_size)
+                self.on_nar_served(hash_part, name, nar_size, remote_id or "")
 
         except Exception as e:
             logger.error(f"Error handling NAR request from {remote_id[:16] if remote_id else 'unknown'}: {e}")
@@ -226,7 +226,7 @@ class NarProtocol(iroh.ProtocolHandler):
 class NarProtocolCreator(iroh.ProtocolCreator):
     """Factory for NarProtocol."""
 
-    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
+    def __init__(self, local_store, on_nar_served: t.Optional[t.Callable[[str, str, int, str], None]] = None):
         self.local_store = local_store
         self.on_nar_served = on_nar_served
 
@@ -249,8 +249,8 @@ class IrohNode:
 
     def __init__(self, local_store, tracker_url: str = None, peer_id: str = None,
                  connect_timeout: float = 10.0, state_dir: t.Optional[Path] = None,
-                 on_served: t.Optional[t.Callable[[str, str], None]] = None,
-                 on_nar_served: t.Optional[t.Callable[[str, str, int], None]] = None):
+                 on_served: t.Optional[t.Callable[[str, str, str], None]] = None,
+                 on_nar_served: t.Optional[t.Callable[[str, str, int, str], None]] = None):
         self.local_store = local_store
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID

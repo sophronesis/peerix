@@ -162,27 +162,38 @@ def _track_request(hash_part: str, name: str = ""):
         _request_counts[hash_part]["name"] = name
 
 
-def _track_served(hash_part: str, name: str = ""):
+def _track_served(hash_part: str, name: str = "", peer_id: str = ""):
     """Track a package served to a peer."""
     if hash_part not in _served_counts:
-        _served_counts[hash_part] = {"count": 0, "name": name}
+        _served_counts[hash_part] = {"count": 0, "name": name, "peers": {}}
     _served_counts[hash_part]["count"] += 1
     # Update name if we have a better one
-    if name and not _served_counts[hash_part]["name"]:
+    if name and not _served_counts[hash_part].get("name"):
         _served_counts[hash_part]["name"] = name
+    # Track per-peer counts
+    if peer_id:
+        short_peer = peer_id[:16] if len(peer_id) > 16 else peer_id
+        if "peers" not in _served_counts[hash_part]:
+            _served_counts[hash_part]["peers"] = {}
+        if short_peer not in _served_counts[hash_part]["peers"]:
+            _served_counts[hash_part]["peers"][short_peer] = 0
+        _served_counts[hash_part]["peers"][short_peer] += 1
 
 
-def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0, name: str = ""):
+def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0, name: str = "", peer_id: str = ""):
     """Log an activity (check or download)."""
-    _activity_log.append({
+    entry = {
         "time": time.time(),
-        "action": action,  # "check" or "download"
+        "action": action,  # "check" or "download" or "served"
         "hash": hash_part,
         "name": name,  # Derivation name (e.g., "python-3.12")
         "source": source,  # "local", "peer:xxxx", "miss"
         "success": success,
         "size": size,
-    })
+    }
+    if peer_id:
+        entry["peer_id"] = peer_id[:16] if len(peer_id) > 16 else peer_id
+    _activity_log.append(entry)
     # Trim to max size
     while len(_activity_log) > _activity_log_max:
         _activity_log.pop(0)
@@ -1549,14 +1560,14 @@ async def run_server(
         logger.info("LocalStore ready")
 
         # Tracking callbacks for iroh protocol handlers
-        def on_iroh_served(hash_part: str, name: str):
+        def on_iroh_served(hash_part: str, name: str, peer_id: str):
             """Track narinfo served via iroh protocol."""
-            _track_served(hash_part, name)
+            _track_served(hash_part, name, peer_id)
 
-        def on_iroh_nar_served(hash_part: str, name: str, size: int):
+        def on_iroh_nar_served(hash_part: str, name: str, size: int, peer_id: str):
             """Track NAR served via iroh protocol."""
-            _track_served(hash_part, name)
-            _log_activity("download", hash_part, "iroh-peer", True, size, name=name)
+            _track_served(hash_part, name, peer_id)
+            _log_activity("served", hash_part, "to-peer", True, size, name=name, peer_id=peer_id)
 
         # Start Iroh node (use serving_store which has filtering/verification applied)
         _iroh_node = IrohNode(
