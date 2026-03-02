@@ -38,9 +38,15 @@ def init_db(db_path: str) -> sqlite3.Connection:
             peer_id TEXT NOT NULL,
             relay_url TEXT,
             direct_addrs TEXT,
+            addr TEXT,
             last_seen REAL NOT NULL
         )
     """)
+    # Migration: add addr column if it doesn't exist (for existing databases)
+    try:
+        conn.execute("ALTER TABLE iroh_peers ADD COLUMN addr TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transfers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,19 +520,22 @@ def create_tracker_app(db_path: str) -> Starlette:
         if not node_id or not peer_id:
             return JSONResponse({"error": "node_id and peer_id required"}, status_code=400)
 
+        # Capture client IP from headers (handles reverse proxy)
+        addr = req.headers.get("X-Real-IP") or req.headers.get("X-Forwarded-For", "").split(",")[0].strip() or req.client.host
+
         now = time.time()
         # Store direct_addrs as JSON string
         addrs_json = json.dumps(direct_addrs) if direct_addrs else "[]"
 
         conn.execute(
-            "INSERT INTO iroh_peers (node_id, peer_id, relay_url, direct_addrs, last_seen) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(node_id) DO UPDATE SET peer_id=?, relay_url=?, direct_addrs=?, last_seen=?",
-            (node_id, peer_id, relay_url, addrs_json, now, peer_id, relay_url, addrs_json, now)
+            "INSERT INTO iroh_peers (node_id, peer_id, relay_url, direct_addrs, addr, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node_id) DO UPDATE SET peer_id=?, relay_url=?, direct_addrs=?, addr=?, last_seen=?",
+            (node_id, peer_id, relay_url, addrs_json, addr, now, peer_id, relay_url, addrs_json, addr, now)
         )
         conn.commit()
 
-        logger.info(f"Iroh peer announced: {node_id[:16]}... (peer={peer_id}, relay={relay_url}, addrs={len(direct_addrs)})")
+        logger.info(f"Iroh peer announced: {node_id[:16]}... (peer={peer_id}, addr={addr}, relay={relay_url})")
         return JSONResponse({"status": "ok"})
 
     @app.route("/iroh/peers", methods=["GET"])
@@ -534,7 +543,7 @@ def create_tracker_app(db_path: str) -> Starlette:
         """List all active Iroh peers with their addresses."""
         cutoff = time.time() - PEER_TTL
         rows = conn.execute(
-            "SELECT node_id, peer_id, relay_url, direct_addrs, last_seen "
+            "SELECT node_id, peer_id, relay_url, direct_addrs, addr, last_seen "
             "FROM iroh_peers WHERE last_seen >= ?",
             (cutoff,)
         ).fetchall()
@@ -551,7 +560,8 @@ def create_tracker_app(db_path: str) -> Starlette:
                 "peer_id": row[1],
                 "relay_url": row[2],
                 "direct_addrs": direct_addrs,
-                "last_seen": row[4],
+                "addr": row[4],  # Real client IP from announcement
+                "last_seen": row[5],
             })
 
         return JSONResponse({"peers": peers, "count": len(peers)})

@@ -744,36 +744,51 @@ async def peers_handler(request: Request) -> Response:
 
     peers = []
     ips_to_lookup = []
+    tracker_peers = {}
+
+    # Fetch peer data from tracker (has real public IPs)
+    if _iroh_node.tracker_url:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{_iroh_node.tracker_url}/iroh/peers")
+                if resp.status_code == 200:
+                    for p in resp.json().get("peers", []):
+                        tracker_peers[p["node_id"]] = p.get("addr")  # Real public IP
+        except Exception as e:
+            logger.debug(f"Failed to fetch tracker peers: {e}")
 
     for node_id, node_addr in _iroh_node._known_peers.items():
-        # Extract IP from direct_addrs (format: "ip:port")
-        ip = None
+        # Get real public IP from tracker
+        public_ip = tracker_peers.get(node_id)
+
+        # Extract direct address from Iroh (might be Tailscale, local, etc.)
+        direct_ip = None
         try:
             direct_addrs = node_addr.direct_addresses()
             if direct_addrs:
-                # Take the first address, extract IP part
                 addr_str = str(direct_addrs[0])
-                # Handle IPv4 and IPv6 formats
                 if addr_str.startswith("["):
-                    # IPv6: [::1]:port
-                    ip = addr_str.split("]:")[0][1:]
+                    direct_ip = addr_str.split("]:")[0][1:]
                 else:
-                    # IPv4: 1.2.3.4:port
-                    ip = addr_str.rsplit(":", 1)[0]
+                    direct_ip = addr_str.rsplit(":", 1)[0]
         except Exception:
             pass
+
+        # Use public IP for geo lookup (more accurate)
+        geo_ip = public_ip or direct_ip
 
         peer_info = {
             "node_id": node_id,
             "node_id_short": node_id[:16] + "...",
-            "ip": ip,
-            "country": _ip_country_cache.get(ip, "") if ip else "",
+            "public_ip": public_ip,      # Real IP from tracker
+            "direct_ip": direct_ip,       # Direct connection IP (may be VPN/Tailscale)
+            "country": _ip_country_cache.get(geo_ip, "") if geo_ip else "",
         }
         peers.append(peer_info)
 
-        # Collect IPs for geo lookup
-        if ip and ip not in _ip_country_cache:
-            ips_to_lookup.append(ip)
+        # Collect IPs for geo lookup (prefer public IP)
+        if geo_ip and geo_ip not in _ip_country_cache:
+            ips_to_lookup.append(geo_ip)
 
     # Batch lookup country codes using ip-api.com
     if ips_to_lookup:
@@ -788,8 +803,9 @@ async def peers_handler(request: Request) -> Response:
                         _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
                     # Update peer countries after lookup
                     for peer in peers:
-                        if peer["ip"] and not peer["country"]:
-                            peer["country"] = _ip_country_cache.get(peer["ip"], "")
+                        geo_ip = peer["public_ip"] or peer["direct_ip"]
+                        if geo_ip and not peer["country"]:
+                            peer["country"] = _ip_country_cache.get(geo_ip, "")
         except Exception as e:
             logger.debug(f"Geo lookup failed: {e}")
 
@@ -1103,9 +1119,17 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     const div = document.createElement('div');
                     div.className = 'peer-item';
                     const flag = countryToFlag(peer.country);
-                    const ipPart = peer.ip ? ` (${peer.ip})` : '';
-                    div.innerHTML = `<span style="margin-right: 6px;">${flag}</span>${peer.node_id_short}${ipPart}`;
-                    div.title = peer.node_id + (peer.ip ? '\\n' + peer.ip : '');
+                    // Show public IP (from tracker) and direct IP (connection path) if different
+                    let ipInfo = '';
+                    if (peer.public_ip && peer.direct_ip && peer.public_ip !== peer.direct_ip) {
+                        ipInfo = `<span style="color:#00ff88">${peer.public_ip}</span> <span style="color:#666">via</span> <span style="color:#888">${peer.direct_ip}</span>`;
+                    } else if (peer.public_ip) {
+                        ipInfo = `<span style="color:#00ff88">${peer.public_ip}</span>`;
+                    } else if (peer.direct_ip) {
+                        ipInfo = `<span style="color:#888">${peer.direct_ip}</span>`;
+                    }
+                    div.innerHTML = `<span style="margin-right: 6px;">${flag}</span>${peer.node_id_short} ${ipInfo}`;
+                    div.title = peer.node_id;
                     peersList.appendChild(div);
                 }
 
