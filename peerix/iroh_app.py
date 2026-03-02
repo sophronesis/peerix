@@ -108,8 +108,28 @@ from .verified import VerifiedStore
 
 # Default path for persisting announced state
 DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
-# Default path for caching filtered hashes
-FILTERED_HASHES_CACHE = "/var/lib/peerix/filtered_hashes.json"
+# Default path for caching filtered/skipped hashes
+FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
+
+# Version info
+PEERIX_VERSION = "0.0.2"
+
+def get_git_commit() -> str:
+    """Get short git commit hash if available."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(__file__)
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except:
+        pass
+    return "unknown"
+
+PEERIX_COMMIT = get_git_commit()
 
 logger = logging.getLogger("peerix.iroh_app")
 
@@ -134,7 +154,7 @@ class StoreManager:
         tracker_url: t.Optional[str] = None,
         peer_id: t.Optional[str] = None,
         state_file: str = DEFAULT_STATE_FILE,
-        filtered_cache_file: str = FILTERED_HASHES_CACHE,
+        filter_cache_file: str = FILTER_CACHE_FILE,
         nixpkgs_filter: t.Optional["NixpkgsFilteredStore"] = None,
         filter_concurrency: int = 10,
     ):
@@ -142,12 +162,14 @@ class StoreManager:
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id
         self._state_file = state_file
-        self._filtered_cache_file = filtered_cache_file
+        self._filter_cache_file = filter_cache_file
         self._nixpkgs_filter = nixpkgs_filter
         self._filter_concurrency = filter_concurrency
         self._available_hashes: t.Set[str] = set()
         self._last_announced_hashes: t.Set[str] = set()
         self._cached_filtered_hashes: t.Set[str] = set()  # Hashes known to pass filter
+        self._cached_skipped_hashes: t.Set[str] = set()   # Hashes known to fail filter
+        self._total_store_paths: int = 0  # Total paths in /nix/store
         self._scan_progress: t.Dict[str, t.Any] = {
             "active": False,
             "total": 0,
@@ -155,6 +177,7 @@ class StoreManager:
             "filtered": 0,
             "filter_checked": 0,
             "filter_found": 0,
+            "filter_skipped": 0,
             "filter_eta": None,
             "last_scan": None,
             "paused": False,
@@ -162,9 +185,9 @@ class StoreManager:
         self._running = False
         self._http_client: t.Optional[httpx.AsyncClient] = None
 
-        # Load previously announced state and filtered cache
+        # Load previously announced state and filter cache
         self._load_announced_state()
-        self._load_filtered_cache()
+        self._load_filter_cache()
 
     def _load_announced_state(self) -> None:
         """Load the set of previously announced hashes from disk."""
@@ -187,27 +210,38 @@ class StoreManager:
         except Exception as e:
             logger.warning(f"Failed to save announced state: {e}")
 
-    def _load_filtered_cache(self) -> None:
-        """Load cached filtered hashes from disk."""
+    def _load_filter_cache(self) -> None:
+        """Load cached filtered and skipped hashes from disk."""
         try:
-            if os.path.exists(self._filtered_cache_file):
-                with open(self._filtered_cache_file, "r") as f:
+            if os.path.exists(self._filter_cache_file):
+                with open(self._filter_cache_file, "r") as f:
                     data = json.load(f)
-                    self._cached_filtered_hashes = set(data.get("hashes", []))
-                    logger.info(f"Loaded {len(self._cached_filtered_hashes)} cached filtered hashes")
+                    self._cached_filtered_hashes = set(data.get("filtered", []))
+                    self._cached_skipped_hashes = set(data.get("skipped", []))
+                    logger.info(
+                        f"Loaded filter cache: {len(self._cached_filtered_hashes)} filtered, "
+                        f"{len(self._cached_skipped_hashes)} skipped"
+                    )
         except Exception as e:
-            logger.warning(f"Failed to load filtered cache: {e}")
+            logger.warning(f"Failed to load filter cache: {e}")
             self._cached_filtered_hashes = set()
+            self._cached_skipped_hashes = set()
 
-    def _save_filtered_cache(self) -> None:
-        """Save filtered hashes cache to disk."""
+    def _save_filter_cache(self) -> None:
+        """Save filtered and skipped hashes cache to disk."""
         try:
-            os.makedirs(os.path.dirname(self._filtered_cache_file), exist_ok=True)
-            with open(self._filtered_cache_file, "w") as f:
-                json.dump({"hashes": list(self._cached_filtered_hashes)}, f)
-            logger.debug(f"Saved {len(self._cached_filtered_hashes)} filtered hashes to cache")
+            os.makedirs(os.path.dirname(self._filter_cache_file), exist_ok=True)
+            with open(self._filter_cache_file, "w") as f:
+                json.dump({
+                    "filtered": list(self._cached_filtered_hashes),
+                    "skipped": list(self._cached_skipped_hashes)
+                }, f)
+            logger.debug(
+                f"Saved filter cache: {len(self._cached_filtered_hashes)} filtered, "
+                f"{len(self._cached_skipped_hashes)} skipped"
+            )
         except Exception as e:
-            logger.warning(f"Failed to save filtered cache: {e}")
+            logger.warning(f"Failed to save filter cache: {e}")
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -227,6 +261,9 @@ class StoreManager:
         progress = self._scan_progress.copy()
         progress["announced_hashes"] = len(self._last_announced_hashes)
         progress["filtering_enabled"] = self._nixpkgs_filter is not None
+        progress["total_store_paths"] = self._total_store_paths
+        progress["cached_filtered"] = len(self._cached_filtered_hashes)
+        progress["cached_skipped"] = len(self._cached_skipped_hashes)
         return progress
 
     def pause(self):
@@ -322,7 +359,7 @@ class StoreManager:
         Only returns hashes that exist in cache.nixos.org.
         Uses semaphore for concurrency control with Kalman ETA.
         Adds hashes to _available_hashes incrementally as they pass.
-        Uses cached filtered hashes to skip HTTP checks for known-good hashes.
+        Uses cached filtered/skipped hashes to skip HTTP checks.
         """
         if not self._nixpkgs_filter:
             return set(hashes)
@@ -331,7 +368,9 @@ class StoreManager:
         semaphore = asyncio.Semaphore(self._filter_concurrency)
         checked = 0
         found = 0
-        cache_hits = 0
+        skipped = 0
+        cache_hits_filtered = 0
+        cache_hits_skipped = 0
         lock = asyncio.Lock()
         last_sync_count = 0
         last_cache_save = 0
@@ -343,23 +382,31 @@ class StoreManager:
                 # Already known to pass filter
                 filtered.add(hsh)
                 self._available_hashes.add(hsh)
-                cache_hits += 1
+                cache_hits_filtered += 1
+            elif hsh in self._cached_skipped_hashes:
+                # Already known to fail filter - skip
+                cache_hits_skipped += 1
             else:
                 hashes_to_check.append(hsh)
 
         total = len(hashes_to_check)
         eta = KalmanETA()
 
-        if cache_hits > 0:
-            logger.info(f"Filter cache: {cache_hits} hits, {total} need checking")
-            self._scan_progress["filter_found"] = cache_hits
+        total_cache_hits = cache_hits_filtered + cache_hits_skipped
+        if total_cache_hits > 0:
+            logger.info(
+                f"Filter cache: {cache_hits_filtered} filtered, "
+                f"{cache_hits_skipped} skipped, {total} need checking"
+            )
+            self._scan_progress["filter_found"] = cache_hits_filtered
+            self._scan_progress["filter_skipped"] = cache_hits_skipped
 
         if total == 0:
             # All from cache
             return filtered
 
         async def check_one(hsh: str) -> t.Optional[str]:
-            nonlocal checked, found, last_sync_count, last_cache_save
+            nonlocal checked, found, skipped, last_sync_count, last_cache_save
             async with semaphore:
                 exists = False
                 try:
@@ -374,12 +421,17 @@ class StoreManager:
                             found += 1
                             # Add to available hashes immediately
                             self._available_hashes.add(hsh)
-                            # Add to cache
+                            # Add to filtered cache
                             self._cached_filtered_hashes.add(hsh)
+                        else:
+                            skipped += 1
+                            # Add to skipped cache
+                            self._cached_skipped_hashes.add(hsh)
 
                         # Update progress
                         self._scan_progress["filter_checked"] = checked
-                        self._scan_progress["filter_found"] = cache_hits + found
+                        self._scan_progress["filter_found"] = cache_hits_filtered + found
+                        self._scan_progress["filter_skipped"] = cache_hits_skipped + skipped
 
                         # Log with ETA every 1000 items
                         if checked % 1000 == 0:
@@ -388,7 +440,7 @@ class StoreManager:
                             pct = (checked / total) * 100
                             logger.info(
                                 f"Filtering: {checked}/{total} ({pct:.1f}%) "
-                                f"found={found} (cache={cache_hits}) ETA={eta_str}"
+                                f"found={found} skipped={skipped} ETA={eta_str}"
                             )
                             self._scan_progress["filter_eta"] = eta_str
 
@@ -401,7 +453,7 @@ class StoreManager:
                         # Save cache every 10000 newly checked hashes
                         if checked - last_cache_save >= 10000:
                             last_cache_save = checked
-                            self._save_filtered_cache()
+                            self._save_filter_cache()
 
         # Check uncached hashes concurrently
         results = await asyncio.gather(*[check_one(h) for h in hashes_to_check])
@@ -409,7 +461,7 @@ class StoreManager:
         filtered.update(newly_filtered)
 
         # Save cache at the end
-        self._save_filtered_cache()
+        self._save_filter_cache()
 
         return filtered
 
@@ -433,6 +485,7 @@ class StoreManager:
         self._scan_progress["filtered"] = 0
         self._scan_progress["filter_checked"] = 0
         self._scan_progress["filter_found"] = 0
+        self._scan_progress["filter_skipped"] = 0
         self._scan_progress["filter_eta"] = None
 
         # Clear available hashes for fresh scan (they get added incrementally during filtering)
@@ -441,6 +494,7 @@ class StoreManager:
         try:
             # scan_store_paths is synchronous but fast (just directory listing)
             all_hashes = scan_store_paths(limit=0)
+            self._total_store_paths = len(all_hashes)
             self._scan_progress["total"] = len(all_hashes)
             self._scan_progress["scanned"] = len(all_hashes)
 
@@ -736,6 +790,7 @@ async def dashboard_stats_handler(request: Request) -> Response:
     """Get dashboard statistics as JSON."""
     stats = {
         "mode": "iroh",
+        "version": f"{PEERIX_VERSION}+{PEERIX_COMMIT}",
         "node_id": _iroh_node._node_id if _iroh_node else None,
         "known_peers": len(_iroh_node._known_peers) if _iroh_node else 0,
         "tracker_url": _iroh_node.tracker_url if _iroh_node else None,
@@ -867,7 +922,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <h1>Peerix Dashboard <span class="mode-badge">Iroh</span></h1>
+    <h1>Peerix Dashboard <span class="mode-badge">Iroh</span> <span id="version" style="font-size: 12px; color: #666; font-weight: normal;"></span></h1>
     <div class="grid">
         <div class="card">
             <h2>Node Status</h2>
@@ -913,8 +968,16 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 </div>
             </div>
             <div class="status-row">
-                <span class="status-label">Available Paths</span>
+                <span class="status-label">Total Store Paths</span>
+                <span class="status-value" id="total-store-paths">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Available (in cache.nixos.org)</span>
                 <span class="value" id="available-hashes">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Skipped (not in cache)</span>
+                <span class="status-value warning" id="skipped-hashes">--</span>
             </div>
             <div class="status-row">
                 <span class="status-label">Announced to Tracker</span>
@@ -966,6 +1029,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 }
                 lastDataHash = currentHash;
 
+                // Version
+                if (stats.version) {
+                    document.getElementById('version').textContent = 'v' + stats.version;
+                }
+
                 // Node info
                 const nodeId = stats.node_id || '--';
                 document.getElementById('node-id').textContent = nodeId.substring(0, 32) + '...';
@@ -994,8 +1062,14 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 }
 
                 // Store stats
-                document.getElementById('available-hashes').textContent = stats.available_hashes || 0;
-                document.getElementById('announced-hashes').textContent = stats.announced_hashes || 0;
+                if (stats.scan && stats.scan.total_store_paths) {
+                    document.getElementById('total-store-paths').textContent = stats.scan.total_store_paths.toLocaleString();
+                }
+                document.getElementById('available-hashes').textContent = (stats.available_hashes || 0).toLocaleString();
+                if (stats.scan && stats.scan.cached_skipped !== undefined) {
+                    document.getElementById('skipped-hashes').textContent = stats.scan.cached_skipped.toLocaleString();
+                }
+                document.getElementById('announced-hashes').textContent = (stats.announced_hashes || 0).toLocaleString();
 
                 if (stats.scan) {
                     document.getElementById('last-scan').textContent = formatTime(stats.scan.last_scan);
