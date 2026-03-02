@@ -1677,6 +1677,16 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
+    # Register signal handler to save stats on shutdown
+    def handle_shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, saving stats...")
+        _save_stats()
+        logger.info("Stats saved, exiting")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
     try:
         asyncio.run(run_server(
             port=args.port,
