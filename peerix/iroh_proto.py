@@ -7,11 +7,58 @@ Peers are identified by public keys, not IP addresses.
 
 import asyncio
 import logging
+import os
+import secrets
 import typing as t
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import iroh
+
+# Default path for persistent identity
+DEFAULT_STATE_DIR = Path("/var/lib/peerix")
+SECRET_KEY_FILE = "iroh_secret.key"
+
+
+def _get_or_create_secret_key(state_dir: t.Optional[Path] = None) -> bytes:
+    """
+    Load or create a persistent secret key for the Iroh node.
+
+    The key is stored as 32 raw bytes (Ed25519 seed).
+    """
+    if state_dir is None:
+        state_dir = DEFAULT_STATE_DIR
+
+    key_path = state_dir / SECRET_KEY_FILE
+
+    # Try to load existing key
+    if key_path.exists():
+        try:
+            key = key_path.read_bytes()
+            if len(key) == 32:
+                logger.debug(f"Loaded secret key from {key_path}")
+                return key
+            else:
+                logger.warning(f"Invalid key length in {key_path}, regenerating")
+        except Exception as e:
+            logger.warning(f"Failed to load secret key from {key_path}: {e}")
+
+    # Generate new key
+    key = secrets.token_bytes(32)
+
+    # Try to save it
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key)
+        # Restrict permissions
+        os.chmod(key_path, 0o600)
+        logger.info(f"Generated new secret key and saved to {key_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save secret key to {key_path}: {e}")
+        logger.warning("Node identity will not persist across restarts")
+
+    return key
 
 logger = logging.getLogger(__name__)
 
@@ -142,14 +189,18 @@ class IrohNode:
     - Creating endpoint with automatic NAT traversal
     - Serving narinfo/nar requests
     - Connecting to peers by public key
+
+    The node identity (secret key) is persisted to disk so the node ID
+    remains stable across restarts.
     """
 
     def __init__(self, local_store, tracker_url: str = None, peer_id: str = None,
-                 connect_timeout: float = 10.0):
+                 connect_timeout: float = 10.0, state_dir: t.Optional[Path] = None):
         self.local_store = local_store
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID
         self.connect_timeout = connect_timeout  # Timeout for peer connections
+        self.state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
         self.iroh: t.Optional[iroh.Iroh] = None
         self.node: t.Optional[iroh.Node] = None
         self.endpoint: t.Optional[iroh.Endpoint] = None
@@ -162,7 +213,7 @@ class IrohNode:
         self._http_client: t.Optional[httpx.AsyncClient] = None
 
     async def start(self):
-        """Start the Iroh node."""
+        """Start the Iroh node with persistent identity."""
         logger.info("Starting Iroh node...")
 
         # Set the event loop for iroh FFI callbacks
@@ -174,11 +225,15 @@ class IrohNode:
             NAR_PROTOCOL: NarProtocolCreator(self.local_store),
         }
 
-        # Create node options
+        # Load or create persistent secret key
+        secret_key = _get_or_create_secret_key(self.state_dir)
+
+        # Create node options with persistent identity
         options = iroh.NodeOptions()
         options.protocols = protocols
+        options.secret_key = secret_key
 
-        # Create iroh instance (in-memory for now, could use persistent storage)
+        # Create iroh instance
         self.iroh = await iroh.Iroh.memory_with_options(options)
 
         # Get sub-objects

@@ -21,6 +21,21 @@
       pkgs = nixpkgs.legacyPackages.${system};
       python = pkgs.python3;
 
+      # Iroh P2P library (binary wheel from PyPI)
+      iroh = python.pkgs.buildPythonPackage rec {
+        pname = "iroh";
+        version = "0.35.0";
+        format = "wheel";
+
+        src = pkgs.fetchurl {
+          url = "https://files.pythonhosted.org/packages/a6/01/afba5b09b5c7dbde2beee05a4e73656de4e3469f930524c15f17b96590f9/iroh-0.35.0-py3-none-manylinux_2_28_x86_64.whl";
+          sha256 = "0im8rilciffg4bznm7pqrnam057a77rnjwfrij2g5bzidih7nrcl";
+        };
+
+        # Binary wheel, no build deps needed
+        pythonImportsCheck = [ "iroh" ];
+      };
+
       # Core packages for peerix (lan/ipfs modes)
       corePackages = with python.pkgs; [
         trio
@@ -28,6 +43,12 @@
         hypercorn
         starlette
         psutil
+      ];
+
+      # Iroh mode packages
+      irohPackages = with python.pkgs; [
+        iroh
+        uvicorn
       ];
 
     in {
@@ -45,7 +66,7 @@
 
           build-system = [ python.pkgs.setuptools ];
 
-          dependencies = corePackages;
+          dependencies = corePackages ++ irohPackages;
 
           propagatedBuildInputs = with pkgs; [
             nix
@@ -86,34 +107,20 @@
         buildInputs = with pkgs; [
           nix-serve
           niv
-          uv
-          (python.withPackages (ps: corePackages ++ (with ps; [
+          (python.withPackages (ps: corePackages ++ irohPackages ++ (with ps; [
             # Dev dependencies
             pytest
             pytest-asyncio
             black
             mypy
-            pip
           ])))
         ];
 
         shellHook = ''
-          # Create venv if it doesn't exist
-          if [ ! -d .venv ]; then
-            echo "Creating virtual environment..."
-            python -m venv .venv
-          fi
-          source .venv/bin/activate
-
-          # Install iroh if not present
-          if ! python -c "import iroh" 2>/dev/null; then
-            echo "Installing iroh..."
-            uv pip install iroh
-          fi
-
-          echo "Peerix development shell (with iroh)"
+          echo "Peerix development shell"
           echo ""
           echo "Run peerix: python -m peerix --mode ipfs"
+          echo "Run iroh mode: python -m peerix.iroh_app --tracker http://sophronesis.dev:12305"
           echo ""
         '';
       };
