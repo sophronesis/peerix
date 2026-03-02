@@ -130,6 +130,25 @@ _ip_country_cache: t.Dict[str, str] = {}
 # Track most requested derivations (hash -> count)
 _request_counts: t.Dict[str, int] = {}
 
+# Activity log (recent checks and downloads)
+_activity_log: t.List[t.Dict[str, t.Any]] = []
+_activity_log_max = 50  # Keep last 50 entries
+
+
+def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0):
+    """Log an activity (check or download)."""
+    _activity_log.append({
+        "time": time.time(),
+        "action": action,  # "check" or "download"
+        "hash": hash_part,
+        "source": source,  # "local", "peer:xxxx", "miss"
+        "success": success,
+        "size": size,
+    })
+    # Trim to max size
+    while len(_activity_log) > _activity_log_max:
+        _activity_log.pop(0)
+
 
 class StoreManager:
     """
@@ -632,6 +651,7 @@ async def narinfo_handler(request: Request) -> Response:
     narinfo = await _local_store.narinfo(hash_part)
     if narinfo:
         logger.debug(f"Found locally: {narinfo.storePath}")
+        _log_activity("check", hash_part, "local", True)
         # Sign the narinfo before returning
         signed_narinfo = sign_narinfo(narinfo)
         return Response(signed_narinfo.dump(), media_type="text/x-nix-narinfo")
@@ -642,6 +662,7 @@ async def narinfo_handler(request: Request) -> Response:
         if result:
             narinfo_content, peer_id = result
             logger.info(f"Got narinfo from peer {peer_id[:16]}...")
+            _log_activity("check", hash_part, f"peer:{peer_id[:8]}", True)
             # Parse the narinfo and rewrite URL to route through our Iroh endpoint
             peer_narinfo = NarInfo.parse(narinfo_content)
             # Rewrite URL: original URL -> /iroh/nar/{peer_id}/{original_url}
@@ -649,6 +670,7 @@ async def narinfo_handler(request: Request) -> Response:
             rewritten_narinfo = peer_narinfo._replace(url=new_url)
             return Response(rewritten_narinfo.dump(), media_type="text/x-nix-narinfo")
 
+    _log_activity("check", hash_part, "miss", False)
     return Response("Not found", status_code=404)
 
 
@@ -669,17 +691,24 @@ async def local_narinfo_handler(request: Request) -> Response:
 async def nar_handler(request: Request) -> Response:
     """Handle NAR requests - stream from local store."""
     nar_path = request.path_params.get("path", "")
+    # Extract hash from path (format: nar/xxx-name.nar or similar)
+    hash_part = nar_path.split("/")[-1].split("-")[0] if nar_path else "?"
 
     try:
         async def stream_nar():
+            total_bytes = 0
             async for chunk in _local_store.nar(nar_path):
+                total_bytes += len(chunk)
                 yield chunk
+            _log_activity("download", hash_part, "local", True, total_bytes)
 
         return StreamingResponse(stream_nar(), media_type="application/x-nix-nar")
     except FileNotFoundError:
+        _log_activity("download", hash_part, "local", False)
         return Response("Not found", status_code=404)
     except Exception as e:
         logger.error(f"NAR error: {e}")
+        _log_activity("download", hash_part, "local", False)
         return Response("Internal error", status_code=500)
 
 
@@ -702,6 +731,8 @@ async def iroh_nar_handler(request: Request) -> Response:
         return Response("Iroh node not available", status_code=503)
 
     logger.info(f"Fetching NAR from peer {peer_id[:16]}...: {nar_path}")
+    # Extract hash from path
+    hash_part = nar_path.split("/")[-1].split("-")[0] if nar_path else "?"
 
     async def stream_from_peer():
         """Stream NAR from peer with error logging."""
@@ -711,11 +742,14 @@ async def iroh_nar_handler(request: Request) -> Response:
                 bytes_streamed += len(chunk)
                 yield chunk
             logger.info(f"HTTP stream complete: {bytes_streamed} bytes for {nar_path}")
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, bytes_streamed)
         except asyncio.TimeoutError:
             logger.error(f"HTTP stream timeout after {bytes_streamed} bytes for {nar_path}")
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed)
             raise
         except Exception as e:
             logger.error(f"HTTP stream error after {bytes_streamed} bytes: {e}")
+            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed)
             raise
 
     return StreamingResponse(stream_from_peer(), media_type="application/x-nix-nar")
@@ -875,6 +909,9 @@ async def dashboard_stats_handler(request: Request) -> Response:
     sorted_requests = sorted(_request_counts.items(), key=lambda x: x[1], reverse=True)[:10]
     stats["most_requested"] = [{"hash": h, "count": c} for h, c in sorted_requests]
     stats["total_requests"] = sum(_request_counts.values())
+
+    # Add activity log (most recent first)
+    stats["activity"] = list(reversed(_activity_log[-20:]))
 
     return JSONResponse(stats)
 
@@ -1062,6 +1099,10 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             </div>
             <div class="peers-list" id="most-requested" style="margin-top: 12px;"></div>
         </div>
+        <div class="card">
+            <h2>Activity Log</h2>
+            <div class="peers-list" id="activity-log" style="max-height: 300px;"></div>
+        </div>
     </div>
     <script>
         let scanPaused = false;
@@ -1201,6 +1242,20 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     div.className = 'peer-item';
                     div.innerHTML = `<span style="color:#00d9ff">${item.count}</span> <span style="color:#888">${item.hash}</span>`;
                     mostRequested.appendChild(div);
+                }
+
+                // Activity log
+                const activityLog = document.getElementById('activity-log');
+                activityLog.innerHTML = '';
+                for (const item of (stats.activity || [])) {
+                    const div = document.createElement('div');
+                    div.className = 'peer-item';
+                    const timeStr = new Date(item.time * 1000).toLocaleTimeString();
+                    const icon = item.action === 'check' ? '🔍' : '📦';
+                    const color = item.success ? '#00ff88' : '#ff4444';
+                    const sizeStr = item.size > 0 ? ` (${(item.size/1024).toFixed(1)}KB)` : '';
+                    div.innerHTML = `<span style="color:#666">${timeStr}</span> ${icon} <span style="color:${color}">${item.source}</span> <span style="color:#888">${item.hash}</span>${sizeStr}`;
+                    activityLog.appendChild(div);
                 }
 
             } catch (e) {
