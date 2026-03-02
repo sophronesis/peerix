@@ -165,19 +165,19 @@ class NarProtocol(iroh.ProtocolHandler):
             # Send length header (8 bytes, big-endian)
             await send.write_all(nar_size.to_bytes(8, 'big'))
 
-            # Send NAR data in chunks with small delays to avoid overwhelming the connection
-            chunk_size = 32768  # 32KB chunks
+            # Send NAR data in small chunks with delays to avoid overwhelming Iroh relay
+            chunk_size = 16384  # 16KB chunks
             bytes_sent = 0
             for i in range(0, nar_size, chunk_size):
                 chunk = nar_data[i:i + chunk_size]
                 await send.write_all(chunk)
                 bytes_sent += len(chunk)
-                # Small yield to let other tasks run and data to be transmitted
-                if bytes_sent % 131072 == 0:  # Every 128KB
-                    await asyncio.sleep(0.01)
+                # Small delay every 64KB to let data be transmitted
+                if bytes_sent % 65536 == 0:
+                    await asyncio.sleep(0.02)
 
-            # Delay before finish to let QUIC buffers flush
-            delay = max(0.2, (nar_size / 1_000_000) * 0.1)  # 200ms base + 100ms per MB
+            # Longer delay before finish to let QUIC buffers flush completely
+            delay = max(0.5, (nar_size / 1_000_000) * 0.3)  # 500ms base + 300ms per MB
             await asyncio.sleep(delay)
             await send.finish()
 
