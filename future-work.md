@@ -50,6 +50,9 @@
 - [ ] Add `Compression: zstd` header to narinfo
 - [ ] Make compression level configurable
 - [ ] Consider caching compressed NARs for frequently requested packages
+- Note: Nix supports zstd compression for NARs via `Compression: zstd` in narinfo
+- Reference: cache.nixos.org uses zstd compression, narinfo includes `Compression: zstd`
+- Implementation: use `zstandard` Python library for streaming compression
 
 ### 9. Iroh Streaming Reliability ✅
 - [x] Investigate IrohError during NAR streaming (connection drops mid-transfer)
