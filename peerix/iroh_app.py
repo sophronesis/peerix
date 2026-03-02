@@ -293,6 +293,7 @@ class StoreManager:
 
         Only returns hashes that exist in cache.nixos.org.
         Uses semaphore for concurrency control with Kalman ETA.
+        Adds hashes to _available_hashes incrementally as they pass.
         """
         if not self._nixpkgs_filter:
             return set(hashes)
@@ -304,9 +305,10 @@ class StoreManager:
         total = len(hashes)
         eta = KalmanETA()
         lock = asyncio.Lock()
+        last_sync_count = 0
 
         async def check_one(hsh: str) -> t.Optional[str]:
-            nonlocal checked, found
+            nonlocal checked, found, last_sync_count
             async with semaphore:
                 try:
                     exists = await self._nixpkgs_filter._check_nixpkgs(hsh)
@@ -318,6 +320,8 @@ class StoreManager:
                         checked += 1
                         if exists:
                             found += 1
+                            # Add to available hashes immediately
+                            self._available_hashes.add(hsh)
 
                         # Update progress
                         self._scan_progress["filter_checked"] = checked
@@ -334,11 +338,25 @@ class StoreManager:
                             )
                             self._scan_progress["filter_eta"] = eta_str
 
+                        # Incremental delta sync every 5000 new hashes found
+                        if self.tracker_url and (found - last_sync_count) >= 5000:
+                            last_sync_count = found
+                            # Schedule sync without blocking
+                            asyncio.create_task(self._incremental_sync())
+
         # Check all hashes concurrently
         results = await asyncio.gather(*[check_one(h) for h in hashes])
         filtered = {r for r in results if r is not None}
 
         return filtered
+
+    async def _incremental_sync(self):
+        """Do an incremental delta sync during filtering."""
+        try:
+            await self.delta_sync_packages()
+            logger.info(f"Incremental sync: {len(self._available_hashes)} hashes available")
+        except Exception as e:
+            logger.warning(f"Incremental sync failed: {e}")
 
     async def scan_once(self) -> int:
         """
@@ -354,6 +372,9 @@ class StoreManager:
         self._scan_progress["filter_found"] = 0
         self._scan_progress["filter_eta"] = None
 
+        # Clear available hashes for fresh scan (they get added incrementally during filtering)
+        self._available_hashes.clear()
+
         try:
             # scan_store_paths is synchronous but fast (just directory listing)
             all_hashes = scan_store_paths(limit=0)
@@ -363,12 +384,13 @@ class StoreManager:
             # Filter through NixpkgsFilteredStore if enabled
             if self._nixpkgs_filter:
                 logger.info(f"Filtering {len(all_hashes)} hashes through cache.nixos.org...")
+                # Hashes are added to _available_hashes incrementally during filtering
                 filtered_hashes = await self._filter_hashes_batch(all_hashes)
                 self._scan_progress["filtered"] = len(all_hashes) - len(filtered_hashes)
                 logger.info(
                     f"Filtered: {len(filtered_hashes)}/{len(all_hashes)} hashes in cache.nixos.org"
                 )
-                self._available_hashes = filtered_hashes
+                # _available_hashes already populated incrementally
             else:
                 self._available_hashes = set(all_hashes)
 
