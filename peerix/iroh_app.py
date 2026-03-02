@@ -164,6 +164,7 @@ class StoreManager:
             "scanned": 0,
             "filtered": 0,
             "filter_checked": 0,
+            "filter_to_check": 0,
             "filter_found": 0,
             "filter_skipped": 0,
             "filter_eta": None,
@@ -380,6 +381,9 @@ class StoreManager:
         total = len(hashes_to_check)
         eta = KalmanETA()
 
+        # Store the number of hashes that need actual HTTP checking
+        self._scan_progress["filter_to_check"] = total
+
         total_cache_hits = cache_hits_filtered + cache_hits_skipped
         if total_cache_hits > 0:
             logger.info(
@@ -391,6 +395,7 @@ class StoreManager:
 
         if total == 0:
             # All from cache
+            self._scan_progress["filter_checked"] = 0
             return filtered
 
         async def check_one(hsh: str) -> t.Optional[str]:
@@ -472,6 +477,7 @@ class StoreManager:
         self._scan_progress["scanned"] = 0
         self._scan_progress["filtered"] = 0
         self._scan_progress["filter_checked"] = 0
+        self._scan_progress["filter_to_check"] = 0
         self._scan_progress["filter_found"] = 0
         self._scan_progress["filter_skipped"] = 0
         self._scan_progress["filter_eta"] = None
@@ -736,8 +742,6 @@ async def peers_handler(request: Request) -> Response:
     if not _iroh_node:
         return JSONResponse({"peers": [], "count": 0})
 
-    hide_ip = request.query_params.get("hide_ip", "false").lower() == "true"
-
     peers = []
     ips_to_lookup = []
 
@@ -762,48 +766,32 @@ async def peers_handler(request: Request) -> Response:
         peer_info = {
             "node_id": node_id,
             "node_id_short": node_id[:16] + "...",
-            "ip": None if hide_ip else ip,
-            "country": "",
+            "ip": ip,
+            "country": _ip_country_cache.get(ip, "") if ip else "",
         }
         peers.append(peer_info)
 
         # Collect IPs for geo lookup
         if ip and ip not in _ip_country_cache:
-            ips_to_lookup.append((peer_info, ip))
+            ips_to_lookup.append(ip)
 
     # Batch lookup country codes using ip-api.com
     if ips_to_lookup:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                # ip-api.com batch endpoint
                 resp = await client.post(
                     "http://ip-api.com/batch?fields=query,countryCode",
-                    json=[ip for _, ip in ips_to_lookup],
+                    json=ips_to_lookup,
                 )
                 if resp.status_code == 200:
                     for item in resp.json():
                         _ip_country_cache[item.get("query", "")] = item.get("countryCode", "")
+                    # Update peer countries after lookup
+                    for peer in peers:
+                        if peer["ip"] and not peer["country"]:
+                            peer["country"] = _ip_country_cache.get(peer["ip"], "")
         except Exception as e:
             logger.debug(f"Geo lookup failed: {e}")
-
-    # Add country codes to peers
-    for peer in peers:
-        ip = peer.get("ip") if not hide_ip else None
-        # Try to get country from cache even if IP is hidden (we still know the IP internally)
-        for node_id, node_addr in _iroh_node._known_peers.items():
-            if peer["node_id"] == node_id:
-                try:
-                    direct_addrs = node_addr.direct_addresses()
-                    if direct_addrs:
-                        addr_str = str(direct_addrs[0])
-                        if addr_str.startswith("["):
-                            actual_ip = addr_str.split("]:")[0][1:]
-                        else:
-                            actual_ip = addr_str.rsplit(":", 1)[0]
-                        peer["country"] = _ip_country_cache.get(actual_ip, "")
-                except Exception:
-                    pass
-                break
 
     return JSONResponse({"peers": peers, "count": len(peers)})
 
@@ -819,9 +807,7 @@ async def scan_status_handler(request: Request) -> Response:
 
 
 async def scan_pause_handler(request: Request) -> Response:
-    """Pause store scanning. Localhost only."""
-    if not is_localhost(request):
-        return Response("Forbidden", status_code=403)
+    """Pause store scanning."""
     if not _store_manager:
         return JSONResponse({"error": "Store manager not initialized"}, status_code=404)
     _store_manager.pause()
@@ -829,9 +815,7 @@ async def scan_pause_handler(request: Request) -> Response:
 
 
 async def scan_resume_handler(request: Request) -> Response:
-    """Resume store scanning. Localhost only."""
-    if not is_localhost(request):
-        return Response("Forbidden", status_code=403)
+    """Resume store scanning."""
     if not _store_manager:
         return JSONResponse({"error": "Store manager not initialized"}, status_code=404)
     _store_manager.resume()
@@ -997,12 +981,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         </div>
         <div class="card">
             <h2>Peers</h2>
-            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
-                <div class="value" id="peer-count">0</div>
-                <label style="font-size: 11px; color: #888; cursor: pointer;">
-                    <input type="checkbox" id="hide-ip" style="margin-right: 4px;"> Hide IPs
-                </label>
-            </div>
+            <div class="value" id="peer-count">0</div>
             <div class="peers-list" id="peers-list"></div>
         </div>
         <div class="card">
@@ -1081,10 +1060,9 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
         async function update() {
             try {
-                const hideIp = document.getElementById('hide-ip')?.checked || false;
                 const [statsResp, peersResp] = await Promise.all([
                     fetch('/dashboard-stats'),
-                    fetch('/peers' + (hideIp ? '?hide_ip=true' : ''))
+                    fetch('/peers')
                 ]);
 
                 const stats = await statsResp.json();
@@ -1154,15 +1132,15 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                         btn.className = 'ctrl-btn running';
                     }
 
-                    // Filter progress
+                    // Filter progress (only show paths that need HTTP checking, not cached ones)
                     const filterProgress = document.getElementById('filter-progress');
-                    if (stats.scan.active && stats.scan.filtering_enabled && stats.scan.filter_checked > 0) {
+                    const toCheck = stats.scan.filter_to_check || 0;
+                    if (stats.scan.active && stats.scan.filtering_enabled && toCheck > 0) {
                         filterProgress.style.display = 'block';
                         const checked = stats.scan.filter_checked || 0;
-                        const total = stats.scan.total || 1;
-                        const pct = (checked / total) * 100;
+                        const pct = (checked / toCheck) * 100;
                         document.getElementById('filter-checked').textContent = checked.toLocaleString();
-                        document.getElementById('filter-total').textContent = total.toLocaleString();
+                        document.getElementById('filter-total').textContent = toCheck.toLocaleString();
                         document.getElementById('filter-bar').style.width = pct + '%';
                         document.getElementById('filter-found').textContent = (stats.scan.filter_found || 0).toLocaleString();
                         document.getElementById('filter-eta').textContent = stats.scan.filter_eta || 'calculating...';
