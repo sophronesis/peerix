@@ -110,6 +110,8 @@ from .verified import VerifiedStore
 DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
 # Default path for caching filtered/skipped hashes
 FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
+# Default path for dashboard stats persistence
+DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
 
 # Version info
 PEERIX_VERSION = "0.0.2"
@@ -184,6 +186,52 @@ def _log_activity(action: str, hash_part: str, source: str, success: bool, size:
     # Trim to max size
     while len(_activity_log) > _activity_log_max:
         _activity_log.pop(0)
+
+
+def _load_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
+    """Load persisted dashboard stats from disk."""
+    global _request_counts, _served_counts, _activity_log
+    try:
+        if os.path.exists(stats_file):
+            with open(stats_file, "r") as f:
+                data = json.load(f)
+                _request_counts = data.get("request_counts", {})
+                _served_counts = data.get("served_counts", {})
+                _activity_log = data.get("activity_log", [])
+                # Trim activity log to max size
+                while len(_activity_log) > _activity_log_max:
+                    _activity_log.pop(0)
+                total_requests = sum(info["count"] for info in _request_counts.values())
+                total_served = sum(info["count"] for info in _served_counts.values())
+                logger.info(
+                    f"Loaded stats: {total_requests} requests, {total_served} served, "
+                    f"{len(_activity_log)} activity entries"
+                )
+    except Exception as e:
+        logger.warning(f"Failed to load stats: {e}")
+
+
+def _save_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
+    """Save dashboard stats to disk."""
+    try:
+        os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+        with open(stats_file, "w") as f:
+            json.dump({
+                "request_counts": _request_counts,
+                "served_counts": _served_counts,
+                "activity_log": _activity_log,
+            }, f)
+        logger.debug("Saved dashboard stats")
+    except Exception as e:
+        logger.warning(f"Failed to save stats: {e}")
+
+
+async def _run_periodic_stats_save(interval: int = 60, stats_file: str = DEFAULT_STATS_FILE):
+    """Periodically save dashboard stats to disk."""
+    logger.info(f"Starting periodic stats save (interval={interval}s)")
+    while True:
+        await asyncio.sleep(interval)
+        _save_stats(stats_file)
 
 
 class StoreManager:
@@ -764,6 +812,10 @@ async def iroh_nar_handler(request: Request) -> Response:
     Fetch NAR from an Iroh peer.
 
     URL format: /iroh/nar/{peer_id}/{original_nar_path}
+
+    Uses pre-buffering with retry to ensure reliable transfers.
+    The entire NAR is fetched before starting the HTTP response,
+    allowing retries on transient iroh errors.
     """
     if not is_localhost(request):
         return Response("Forbidden", status_code=403)
@@ -778,34 +830,47 @@ async def iroh_nar_handler(request: Request) -> Response:
         return Response("Iroh node not available", status_code=503)
 
     logger.info(f"Fetching NAR from peer {peer_id[:16]}...: {nar_path}")
-    # Extract hash and name from path
-    filename = nar_path.split("/")[-1] if nar_path else ""
-    hash_part = filename.split("-")[0] if filename else "?"
-    # Extract name: xxxxx-foo-bar.nar -> foo-bar
+    # Extract hash and name from path (base64-encoded store path)
+    hash_part = "?"
     drv_name = ""
-    if "-" in filename:
-        name_part = filename.split("-", 1)[1]  # Everything after first dash
-        drv_name = name_part.rsplit(".", 1)[0] if "." in name_part else name_part
+    try:
+        import base64
+        # Remove .nar suffix if present
+        path_to_decode = nar_path
+        if path_to_decode.endswith(".nar"):
+            path_to_decode = path_to_decode[:-4]
+        # Decode base64 (handle URL-safe encoding)
+        decoded = base64.b64decode(path_to_decode.replace("_", "/")).decode("utf-8")
+        # Extract from /nix/store/xxxxx-name
+        basename = decoded.split("/")[-1]
+        hash_part = basename[:32] if len(basename) > 32 else basename
+        if len(basename) > 33 and basename[32] == "-":
+            drv_name = basename[33:]
+    except Exception as e:
+        logger.debug(f"Failed to decode nar_path: {e}")
 
-    async def stream_from_peer():
-        """Stream NAR from peer with error logging."""
-        bytes_streamed = 0
-        try:
-            async for chunk in _iroh_node.fetch_nar(peer_id, nar_path):
-                bytes_streamed += len(chunk)
-                yield chunk
-            logger.info(f"HTTP stream complete: {bytes_streamed} bytes for {nar_path}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, bytes_streamed, name=drv_name)
-        except asyncio.TimeoutError:
-            logger.error(f"HTTP stream timeout after {bytes_streamed} bytes for {nar_path}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed, name=drv_name)
-            raise
-        except Exception as e:
-            logger.error(f"HTTP stream error after {bytes_streamed} bytes: {e}")
-            _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, bytes_streamed, name=drv_name)
-            raise
+    try:
+        # Pre-buffer the entire NAR with retry support
+        nar_data = await _iroh_node.fetch_nar_buffered(peer_id, nar_path, max_retries=3)
+        logger.info(f"NAR buffered: {len(nar_data)} bytes for {nar_path}")
+        _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, len(nar_data), name=drv_name)
 
-    return StreamingResponse(stream_from_peer(), media_type="application/x-nix-nar")
+        # Stream the buffered data to the HTTP response
+        async def stream_buffered():
+            chunk_size = 65536
+            for i in range(0, len(nar_data), chunk_size):
+                yield nar_data[i:i + chunk_size]
+
+        return StreamingResponse(
+            stream_buffered(),
+            media_type="application/x-nix-nar",
+            headers={"Content-Length": str(len(nar_data))}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to fetch NAR from peer {peer_id[:16]}: {e}")
+        _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, 0, name=drv_name)
+        return Response(f"Failed to fetch NAR: {e}", status_code=502)
 
 
 async def status_handler(request: Request) -> Response:
@@ -1450,6 +1515,9 @@ async def run_server(
     if tracker_url:
         logger.info(f"Tracker: {tracker_url}")
 
+    # Load persisted dashboard stats
+    _load_stats()
+
     # Start local store
     async with local_async() as store:
         # Build the store chain: local → verified → filtered
@@ -1480,6 +1548,16 @@ async def run_server(
         _local_store = serving_store
         logger.info("LocalStore ready")
 
+        # Tracking callbacks for iroh protocol handlers
+        def on_iroh_served(hash_part: str, name: str):
+            """Track narinfo served via iroh protocol."""
+            _track_served(hash_part, name)
+
+        def on_iroh_nar_served(hash_part: str, name: str, size: int):
+            """Track NAR served via iroh protocol."""
+            _track_served(hash_part, name)
+            _log_activity("download", hash_part, "iroh-peer", True, size, name=name)
+
         # Start Iroh node (use serving_store which has filtering/verification applied)
         _iroh_node = IrohNode(
             serving_store,
@@ -1487,6 +1565,8 @@ async def run_server(
             peer_id=peer_id,
             connect_timeout=connect_timeout,
             state_dir=state_dir,
+            on_served=on_iroh_served,
+            on_nar_served=on_iroh_nar_served,
         )
 
         try:
@@ -1524,7 +1604,7 @@ async def run_server(
             )
             server = uvicorn.Server(config)
 
-            # Run server, tracker sync, and store scanning concurrently
+            # Run server, tracker sync, store scanning, and stats persistence concurrently
             # (delta sync is now integrated into periodic scan)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(server.serve())
@@ -1532,10 +1612,15 @@ async def run_server(
                     tg.create_task(_iroh_node.run_tracker_sync())
                 if _store_manager and scan_interval > 0:
                     tg.create_task(_store_manager.run_periodic_scan())
+                # Save dashboard stats every 60 seconds
+                tg.create_task(_run_periodic_stats_save(interval=60))
 
         except asyncio.CancelledError:
             logger.info("Shutting down...")
         finally:
+            # Save stats before shutdown
+            _save_stats()
+            logger.info("Dashboard stats saved")
             if _store_manager:
                 await _store_manager.close()
                 _store_manager = None
