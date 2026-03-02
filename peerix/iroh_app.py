@@ -931,6 +931,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
     </div>
     <script>
         let scanPaused = false;
+        let lastDataHash = '';
 
         async function toggleScan() {
             const endpoint = scanPaused ? '/scan/resume' : '/scan/pause';
@@ -943,6 +944,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
             return date.toLocaleTimeString();
         }
 
+        // Simple hash function for change detection
+        function hashData(obj) {
+            return JSON.stringify(obj);
+        }
+
         async function update() {
             try {
                 const [statsResp, peersResp] = await Promise.all([
@@ -952,6 +958,13 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 
                 const stats = await statsResp.json();
                 const peersData = await peersResp.json();
+
+                // Check if data changed
+                const currentHash = hashData({stats, peersData});
+                if (currentHash === lastDataHash) {
+                    return; // No changes, skip DOM update
+                }
+                lastDataHash = currentHash;
 
                 // Node info
                 const nodeId = stats.node_id || '--';
