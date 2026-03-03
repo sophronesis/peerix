@@ -1789,7 +1789,21 @@ def main():
                         help="Max concurrent requests when filtering hashes (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
+    parser.add_argument("--allow-insecure-http", action="store_true",
+                        help="Allow HTTP (non-TLS) connections to tracker/upstream (INSECURE, for testing only)")
     args = parser.parse_args()
+
+    # Security: Enforce TLS for tracker and upstream cache URLs
+    # Unless explicitly disabled with --allow-insecure-http
+    if not args.allow_insecure_http:
+        if args.tracker and not args.tracker.startswith("https://"):
+            print(f"ERROR: Tracker URL must use HTTPS: {args.tracker}")
+            print("Use --allow-insecure-http to disable TLS enforcement (INSECURE)")
+            raise SystemExit(1)
+        if args.upstream_cache and not args.upstream_cache.startswith("https://"):
+            print(f"ERROR: Upstream cache URL must use HTTPS: {args.upstream_cache}")
+            print("Use --allow-insecure-http to disable TLS enforcement (INSECURE)")
+            raise SystemExit(1)
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(

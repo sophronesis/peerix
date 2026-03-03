@@ -8,11 +8,36 @@ import shutil
 import base64
 import sys
 import os
+import re
 
 import trio
 import httpx
 
 from peerix.store import NarInfo, CacheInfo, Store
+
+
+# Regex for valid Nix store path: /nix/store/{32-char-hash}-{name}
+# Hash: 32 chars of [0-9a-z] (nix base32)
+# Name: alphanumeric, dot, underscore, hyphen, plus
+NIX_STORE_PATH_PATTERN = re.compile(
+    r'^/nix/store/[0-9a-z]{32}-[a-zA-Z0-9._+-]+$'
+)
+
+
+def validate_store_path(path: str) -> bool:
+    """
+    Validate that a path is a valid Nix store path.
+
+    Security: Prevents command injection by ensuring path contains
+    only valid characters before passing to subprocess.
+
+    Args:
+        path: Path to validate
+
+    Returns:
+        True if valid Nix store path format
+    """
+    return bool(NIX_STORE_PATH_PATTERN.match(path))
 
 
 nix_serve = shutil.which("nix-serve")
@@ -87,6 +112,12 @@ class LocalStore(Store):
         return self._nar_pull(real_path)
 
     async def _nar_pull(self, path: str) -> t.AsyncIterable[bytes]:
+        # Security: Validate path format before passing to subprocess
+        # Prevents command injection via malformed paths
+        if not validate_store_path(path):
+            logger.warning(f"Invalid store path format blocked: {path}")
+            raise FileNotFoundError(f"Invalid store path format: {path}")
+
         logger.info(f"Serving {path}")
         process = await trio.lowlevel.open_process(
             [nix, "dump-path", "--", path],

@@ -118,6 +118,16 @@ in
         '';
       };
 
+      allowInsecureHttp = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Allow HTTP (non-TLS) connections to tracker and upstream cache.
+          WARNING: This is insecure and should only be used for testing.
+          By default, peerix requires HTTPS for all external connections.
+        '';
+      };
+
       # IPFS scan options
       scanInterval = lib.mkOption {
         type = types.int;
@@ -481,7 +491,8 @@ in
               ${lib.optionalString (cfg.trackerUrl != null) "--tracker ${cfg.trackerUrl}"} \
               --priority ${toString cfg.priority} \
               --filter-concurrency ${toString cfg.filterConcurrency} \
-              --state-dir /var/lib/peerix
+              --state-dir /var/lib/peerix \
+              ${lib.optionalString cfg.allowInsecureHttp "--allow-insecure-http"}
           '';
           # Legacy modes (ipfs, lan)
           legacyScript = let
