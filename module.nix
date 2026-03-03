@@ -2,6 +2,10 @@
 let
   cfg = config.services.peerix;
   tcfg = config.services.peerix-tracker;
+  # Auto-detect mode based on tracker URL:
+  # - trackerUrl set → Iroh mode (P2P with NAT traversal via tracker)
+  # - trackerUrl null → LAN mode (UDP broadcast, local network only)
+  useIrohMode = cfg.trackerUrl != null;
 in
 {
   options = with lib; {
@@ -83,7 +87,9 @@ in
         type = types.nullOr types.str;
         default = null;
         description = ''
-          URL of the peerix tracker server for CID registry (used in IPFS mode).
+          URL of the peerix tracker server for peer discovery.
+          If set: Uses Iroh mode (P2P with NAT traversal via tracker).
+          If null: Uses LAN mode (UDP broadcast, local network only).
         '';
       };
 
@@ -209,7 +215,7 @@ in
     (lib.mkIf (cfg.enable) {
       systemd.services.peerix = {
         enable = true;
-        description = "Local p2p nix caching daemon";
+        description = "Local p2p nix caching daemon (${if useIrohMode then "Iroh" else "LAN"} mode)";
         wantedBy = ["multi-user.target"];
         serviceConfig = {
           Type = "simple";
@@ -260,11 +266,12 @@ in
         };
         # Enable reload support
         reloadIfChanged = true;
-        script = ''
+        script = if useIrohMode then ''
+          # Iroh mode: P2P with NAT traversal via tracker
           export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
           exec ${cfg.package}/bin/peerix-iroh \
             --port 12304 \
-            ${lib.optionalString (cfg.trackerUrl != null) "--tracker ${cfg.trackerUrl}"} \
+            --tracker ${cfg.trackerUrl} \
             --priority ${toString cfg.priority} \
             --timeout ${toString cfg.timeout} \
             --scan-interval ${toString cfg.scanInterval} \
@@ -275,6 +282,16 @@ in
             ${lib.optionalString cfg.noFilter "--no-filter"} \
             ${lib.optionalString cfg.noVerify "--no-verify"} \
             ${lib.optionalString cfg.allowInsecureHttp "--allow-insecure-http"}
+        '' else ''
+          # LAN mode: UDP broadcast, local network only
+          export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"
+          exec ${cfg.package}/bin/peerix \
+            --mode lan \
+            --port 12304 \
+            --priority ${toString cfg.priority} \
+            --timeout ${toString (builtins.floor (cfg.timeout * 1000))} \
+            --scan-interval ${toString cfg.scanInterval} \
+            --filter-mode ${cfg.filterMode}
         '';
       };
 
