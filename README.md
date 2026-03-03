@@ -68,6 +68,8 @@ Store path hashes are verified against `cache.nixos.org` by default.
 - Connection pooling with retry logic
 - Pre-buffered NAR streaming for reliability
 - Web dashboard at `http://localhost:12304/dashboard`
+- Health check at `http://localhost:12304/health`
+- Prometheus metrics at `http://localhost:12304/metrics`
 
 Configuration
 -------------
@@ -141,6 +143,7 @@ Configuration Options
 | `services.peerix.noFilter` | Disable filtering (serve all packages) | `false` |
 | `services.peerix.noVerify` | Disable hash verification against upstream | `false` |
 | `services.peerix.allowInsecureHttp` | Allow HTTP (non-TLS) connections | `false` |
+| `services.peerix.lanDiscovery` | Enable LAN discovery alongside Iroh | `false` |
 
 ### Tracker Service
 
@@ -181,7 +184,11 @@ CLI Usage
 # Run with Iroh mode (default)
 peerix-iroh --port 12304 --tracker https://sophronesis.dev/peerix --verbose
 
+# Run with LAN discovery enabled (supplements Iroh)
+peerix-iroh --lan-discovery --verbose
+
 # Options
+--config, -c    Path to config file (default: ~/.config/peerix/config.toml)
 --port          HTTP port (default: 12304)
 --tracker       Tracker URL for peer discovery
 --peer-id       Human-readable peer ID (default: hostname)
@@ -193,12 +200,14 @@ peerix-iroh --port 12304 --tracker https://sophronesis.dev/peerix --verbose
 --no-filter     Disable package filtering
 --no-verify     Disable hash verification
 --filter-concurrency  Max concurrent filter requests (default: 10)
+--lan-discovery Enable LAN peer discovery via UDP broadcast
 --verbose       Enable verbose logging
 ```
 
 Version History
 ---------------
 
+- **v0.0.4**: Health/metrics endpoints, peer reputation, unified LAN+Iroh, config file, test suite
 - **v0.0.3**: Iroh P2P integration, dashboard, peer tracking, stats persistence
 - **v0.0.2**: IPFS mode, filtering, verification
 - **v0.0.1**: Initial release with LAN mode

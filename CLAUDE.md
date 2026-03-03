@@ -34,9 +34,10 @@ peerix-tracker --port 12305
 
 # Run from source (inside dev shell)
 python -m peerix.iroh_app --port 12304 --verbose
-```
 
-There are no tests in this project.
+# Run tests
+pytest peerix/tests/ -v
+```
 
 ## Architecture
 
@@ -51,7 +52,9 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **`filtered.py`** — `FilteredStore`, `NixpkgsFilteredStore`: filters packages via patterns or cache.nixos.org HEAD requests.
 - **`verified.py`** — `VerifiedStore`: verifies store path hashes against upstream cache with TOCTOU protection.
 - **`signing.py`** — Narinfo signing with ed25519 (pynacl). Handles `NIX_SECRET_KEY_FILE` environment variable.
-- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry, package hash registry, Iroh peer announcements.
+- **`tracker.py`** — Standalone tracker server (Starlette + SQLite). Manages peer registry, package hash registry, Iroh peer announcements. Supports DELETE for peer deregistration.
+- **`lan_discovery.py`** — Asyncio UDP broadcast for LAN peer discovery. Works alongside Iroh mode.
+- **`config.py`** — TOML config file loading from `~/.config/peerix/config.toml`.
 
 ### Iroh module (`peerix/`)
 
@@ -59,13 +62,18 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
   - `StoreManager`: Manages store scanning, filtering, delta sync with tracker
   - `_track_request()`, `_track_served()`, `_log_activity()`: Dashboard stats tracking
   - `_load_stats()`, `_save_stats()`: Stats persistence to `/var/lib/peerix/stats.json`
+  - `/health`: Health check endpoint for systemd watchdog
+  - `/metrics`: Prometheus-compatible metrics endpoint
   - Dashboard HTML served at `/dashboard`
   - Signal handler saves stats on SIGTERM/SIGINT
+  - LAN discovery integration via `_lan_discovery` global
 - **`iroh_proto.py`** — Iroh protocol handlers and node management.
   - `IrohNode`: Main P2P node with persistent identity, connection pooling, tracker sync
   - `NarinfoProtocol`: Handles `/peerix/narinfo/1.0.0` requests
   - `NarProtocol`: Handles `/peerix/nar/1.0.0` requests with length-prefixed streaming
+  - `PeerReputation`: Tracks peer reliability with exponential backoff
   - `fetch_nar_buffered()`: Pre-buffered NAR fetching with retry support
+  - `deregister_from_tracker()`: Graceful shutdown with tracker cleanup
 - **`store_scanner.py`** — Scans `/nix/store` for path hashes.
 
 ### Network protocol
@@ -96,9 +104,28 @@ The system has two halves — a **local store** (wraps `nix-serve` for the machi
 - **NAR URL format**: NARs from peers use URL format `iroh/nar/{peer_id}/{base64_store_path}.nar`.
 - **Pre-buffered NAR fetching**: `fetch_nar_buffered()` downloads entire NAR before HTTP response starts, enabling retries on transient Iroh errors.
 
+## Testing
+
+```bash
+# Run all tests
+pytest peerix/tests/ -v
+
+# Run specific test class
+pytest peerix/tests/test_core.py::TestNarHash -v
+```
+
+Test coverage:
+- `TestNarHash`: NAR hash computation and verification
+- `TestPathValidation`: Nix store path validation
+- `TestPeerReputation`: Peer reputation scoring and backoff
+- `TestConfig`: Config file loading
+- `TestKalmanETA`: ETA estimation formatting
+- `TestMetrics`: Metrics recording
+- `TestHealthState`: Health state tracking
+
 ## Dependencies
 
-Python: `asyncio`, `starlette`, `httpx`, `pynacl` (optional, for signing), `uvicorn`, `iroh`
+Python: `asyncio`, `starlette`, `httpx`, `pynacl` (optional, for signing), `uvicorn`, `iroh`, `pytest` (for tests)
 System: `nix`, `nix-serve` (both must be on PATH)
 
 ## Deployment
