@@ -71,13 +71,20 @@ class LocalStore(Store):
         if sp.endswith(".nar"):
             sp = sp[:-4]
         path = base64.b64decode(sp.replace("_", "/")).decode("utf-8")
-        if not path.startswith((await self.cache_info()).storeDir):
+
+        # Security: resolve symlinks and normalize path to prevent traversal attacks
+        # e.g., /nix/store/../etc/passwd would pass startswith but escape store
+        cache = await self.cache_info()
+        real_path = os.path.realpath(path)
+        store_dir = cache.storeDir.rstrip("/") + "/"
+        if not real_path.startswith(store_dir):
+            logger.warning(f"Path traversal attempt blocked: {path} -> {real_path}")
+            raise FileNotFoundError(f"Path outside store: {path}")
+
+        if not os.path.exists(real_path):
             raise FileNotFoundError()
 
-        if not os.path.exists(path):
-            raise FileNotFoundError()
-
-        return self._nar_pull(path)
+        return self._nar_pull(real_path)
 
     async def _nar_pull(self, path: str) -> t.AsyncIterable[bytes]:
         logger.info(f"Serving {path}")

@@ -18,10 +18,53 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse, JSONResponse
 from starlette.routing import Route
 
+import base64
+import hashlib
 import json
 import os
+import urllib.parse
 
 import httpx
+
+
+def compute_nar_hash(data: bytes) -> str:
+    """
+    Compute NarHash in Nix format: sha256:base32_encoded_hash
+
+    Nix uses a custom base32 alphabet (no padding, specific chars).
+    """
+    sha256_digest = hashlib.sha256(data).digest()
+    # Nix base32 alphabet (different from standard!)
+    NIX_BASE32_CHARS = "0123456789abcdfghjklmnpqrstvwxyz"
+
+    # Convert to Nix base32 (big-endian, no padding)
+    result = []
+    # Process 5 bits at a time from the hash
+    bits = int.from_bytes(sha256_digest, 'big')
+    for _ in range(52):  # 256 bits / 5 = 51.2, so 52 chars
+        result.append(NIX_BASE32_CHARS[bits & 0x1f])
+        bits >>= 5
+
+    return f"sha256:{(''.join(reversed(result)))[:52]}"
+
+
+def verify_nar_hash(data: bytes, expected_hash: str) -> bool:
+    """
+    Verify NAR data matches expected hash.
+
+    Args:
+        data: The NAR content bytes
+        expected_hash: Expected hash in format "sha256:base32hash"
+
+    Returns:
+        True if hash matches, False otherwise
+    """
+    if not expected_hash.startswith("sha256:"):
+        logger.warning(f"Unsupported hash format: {expected_hash}")
+        return False
+
+    computed = compute_nar_hash(data)
+    return computed == expected_hash
 
 
 class KalmanETA:
@@ -761,8 +804,10 @@ async def narinfo_handler(request: Request) -> Response:
             drv_name = _extract_drv_name(peer_narinfo.storePath)
             _track_request(hash_part, drv_name)
             _log_activity("check", hash_part, f"peer:{peer_id[:8]}", True, name=drv_name)
-            # Rewrite URL: original URL -> /iroh/nar/{peer_id}/{original_url}
-            new_url = f"iroh/nar/{peer_id}/{peer_narinfo.url}"
+            # Rewrite URL: original URL -> /iroh/nar/{peer_id}/{nar_hash_urlsafe}/{original_url}
+            # Include NarHash in URL for verification after download (security)
+            nar_hash_urlsafe = urllib.parse.quote(peer_narinfo.narHash, safe='')
+            new_url = f"iroh/nar/{peer_id}/{nar_hash_urlsafe}/{peer_narinfo.url}"
             rewritten_narinfo = peer_narinfo._replace(url=new_url)
             return Response(rewritten_narinfo.dump(), media_type="text/x-nix-narinfo")
 
@@ -820,22 +865,30 @@ async def nar_handler(request: Request) -> Response:
 
 async def iroh_nar_handler(request: Request) -> Response:
     """
-    Fetch NAR from an Iroh peer.
+    Fetch NAR from an Iroh peer with hash verification.
 
-    URL format: /iroh/nar/{peer_id}/{original_nar_path}
+    URL format: /iroh/nar/{peer_id}/{expected_nar_hash}/{original_nar_path}
 
     Uses pre-buffering with retry to ensure reliable transfers.
     The entire NAR is fetched before starting the HTTP response,
     allowing retries on transient iroh errors.
+
+    Security: After download, verifies the NAR content matches the expected
+    NarHash from the narinfo. This prevents malicious peers from serving
+    arbitrary content with valid-looking narinfo.
     """
     if not is_localhost(request):
         return Response("Forbidden", status_code=403)
 
     peer_id = request.path_params.get("peer_id", "")
+    expected_nar_hash = request.path_params.get("nar_hash", "")
     nar_path = request.path_params.get("path", "")
 
     if not peer_id or not nar_path:
         return Response("Bad request", status_code=400)
+
+    # Decode URL-encoded NarHash (e.g., sha256%3Axxxxx -> sha256:xxxxx)
+    expected_nar_hash = urllib.parse.unquote(expected_nar_hash)
 
     if not _iroh_node:
         return Response("Iroh node not available", status_code=503)
@@ -845,7 +898,6 @@ async def iroh_nar_handler(request: Request) -> Response:
     hash_part = "?"
     drv_name = ""
     try:
-        import base64
         # Remove .nar suffix if present
         path_to_decode = nar_path
         if path_to_decode.endswith(".nar"):
@@ -864,6 +916,26 @@ async def iroh_nar_handler(request: Request) -> Response:
         # Pre-buffer the entire NAR with retry support
         nar_data = await _iroh_node.fetch_nar_buffered(peer_id, nar_path, max_retries=3)
         logger.info(f"NAR buffered: {len(nar_data)} bytes for {nar_path}")
+
+        # Security: Verify NAR content matches expected hash from narinfo
+        # This prevents malicious peers from serving arbitrary content
+        if expected_nar_hash:
+            if not verify_nar_hash(nar_data, expected_nar_hash):
+                computed_hash = compute_nar_hash(nar_data)
+                logger.error(
+                    f"NAR hash mismatch from peer {peer_id[:16]}! "
+                    f"Expected: {expected_nar_hash}, Got: {computed_hash}"
+                )
+                _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, len(nar_data), name=drv_name)
+                return Response(
+                    f"NAR hash verification failed: content from peer does not match expected hash",
+                    status_code=502
+                )
+            logger.debug(f"NAR hash verified: {expected_nar_hash}")
+        else:
+            # No hash provided - legacy URL format, log warning
+            logger.warning(f"No expected hash for NAR verification (legacy URL format)")
+
         _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, len(nar_data), name=drv_name)
 
         # Stream the buffered data to the HTTP response
@@ -1461,7 +1533,7 @@ def create_app() -> Starlette:
         Route("/{hash}.narinfo", narinfo_handler),
         Route("/local/{hash}.narinfo", local_narinfo_handler),
         Route("/nar/{path:path}", nar_handler),
-        Route("/iroh/nar/{peer_id}/{path:path}", iroh_nar_handler),
+        Route("/iroh/nar/{peer_id}/{nar_hash}/{path:path}", iroh_nar_handler),
         Route("/status", status_handler),
         Route("/peers", peers_handler),
         Route("/scan-status", scan_status_handler),
