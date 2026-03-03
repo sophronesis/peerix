@@ -148,6 +148,7 @@ from .signing import init_signer, sign_narinfo
 from .store_scanner import scan_store_paths
 from .filtered import FilteredStore, NixpkgsFilteredStore
 from .verified import VerifiedStore
+from .lan_discovery import LANDiscovery
 
 # Default path for persisting announced state
 DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
@@ -157,7 +158,7 @@ FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
 
 # Version info
-PEERIX_VERSION = "0.0.3"
+PEERIX_VERSION = "0.0.4"
 # Git commit is passed via PEERIX_COMMIT env var at build time (from flake.nix)
 PEERIX_COMMIT = os.environ.get("PEERIX_COMMIT", "dev")
 
@@ -165,6 +166,7 @@ logger = logging.getLogger("peerix.iroh_app")
 
 # Global state
 _iroh_node: t.Optional[IrohNode] = None
+_lan_discovery: t.Optional[LANDiscovery] = None
 _local_store: t.Optional[LocalStoreAsync] = None
 _cache_priority: int = 5
 _store_manager: t.Optional["StoreManager"] = None
@@ -181,6 +183,62 @@ _served_counts: t.Dict[str, t.Dict[str, t.Any]] = {}
 # Activity log (recent checks and downloads)
 _activity_log: t.List[t.Dict[str, t.Any]] = []
 _activity_log_max = 50  # Keep last 50 entries
+
+# Health tracking
+_health_state: t.Dict[str, t.Any] = {
+    "start_time": time.time(),
+    "last_successful_operation": None,
+    "last_store_scan": None,
+    "last_tracker_sync": None,
+    "errors_count": 0,
+}
+
+# Prometheus metrics tracking
+_metrics: t.Dict[str, t.Any] = {
+    "nars_served_total": 0,
+    "narinfos_served_total": 0,
+    "bytes_sent_total": 0,
+    "bytes_received_total": 0,
+    "cache_hits_total": 0,
+    "cache_misses_total": 0,
+    "peer_requests_total": 0,
+    "request_duration_seconds": [],  # List of (duration, labels) for histogram
+}
+_metrics_lock = asyncio.Lock() if asyncio else None  # Will be set on first use
+
+# Per-peer bandwidth tracking: peer_id -> {bytes_sent, bytes_received, last_seen, requests}
+_peer_bandwidth: t.Dict[str, t.Dict[str, t.Any]] = {}
+
+
+def _record_metric(name: str, value: float = 1, labels: t.Dict[str, str] = None):
+    """Record a metric value."""
+    global _metrics
+    if name in _metrics:
+        if isinstance(_metrics[name], (int, float)):
+            _metrics[name] += value
+        elif isinstance(_metrics[name], list):
+            _metrics[name].append((value, labels or {}))
+            # Keep only last 1000 for histogram
+            if len(_metrics[name]) > 1000:
+                _metrics[name] = _metrics[name][-1000:]
+
+
+def _record_peer_bandwidth(peer_id: str, bytes_sent: int = 0, bytes_received: int = 0):
+    """Record bandwidth for a specific peer."""
+    global _peer_bandwidth
+    short_id = peer_id[:16] if len(peer_id) > 16 else peer_id
+    if short_id not in _peer_bandwidth:
+        _peer_bandwidth[short_id] = {
+            "bytes_sent": 0,
+            "bytes_received": 0,
+            "requests": 0,
+            "last_seen": time.time(),
+            "full_id": peer_id,
+        }
+    _peer_bandwidth[short_id]["bytes_sent"] += bytes_sent
+    _peer_bandwidth[short_id]["bytes_received"] += bytes_received
+    _peer_bandwidth[short_id]["requests"] += 1
+    _peer_bandwidth[short_id]["last_seen"] = time.time()
 
 
 def _extract_drv_name(store_path: str) -> str:
@@ -225,8 +283,9 @@ def _track_served(hash_part: str, name: str = "", peer_id: str = ""):
 
 def _log_activity(action: str, hash_part: str, source: str, success: bool, size: int = 0, name: str = "", peer_id: str = ""):
     """Log an activity (check or download)."""
+    now = time.time()
     entry = {
-        "time": time.time(),
+        "time": now,
         "action": action,  # "check" or "download" or "served"
         "hash": hash_part,
         "name": name,  # Derivation name (e.g., "python-3.12")
@@ -241,10 +300,16 @@ def _log_activity(action: str, hash_part: str, source: str, success: bool, size:
     while len(_activity_log) > _activity_log_max:
         _activity_log.pop(0)
 
+    # Update health state
+    if success:
+        _health_state["last_successful_operation"] = now
+    else:
+        _health_state["errors_count"] = _health_state.get("errors_count", 0) + 1
+
 
 def _load_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
     """Load persisted dashboard stats from disk."""
-    global _request_counts, _served_counts, _activity_log
+    global _request_counts, _served_counts, _activity_log, _peer_bandwidth, _metrics
     try:
         if os.path.exists(stats_file):
             with open(stats_file, "r") as f:
@@ -252,6 +317,14 @@ def _load_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
                 _request_counts = data.get("request_counts", {})
                 _served_counts = data.get("served_counts", {})
                 _activity_log = data.get("activity_log", [])
+                _peer_bandwidth = data.get("peer_bandwidth", {})
+                # Load metrics counters (but not histograms)
+                saved_metrics = data.get("metrics", {})
+                for key in ["nars_served_total", "narinfos_served_total", "bytes_sent_total",
+                            "bytes_received_total", "cache_hits_total", "cache_misses_total",
+                            "peer_requests_total"]:
+                    if key in saved_metrics:
+                        _metrics[key] = saved_metrics[key]
                 # Trim activity log to max size
                 while len(_activity_log) > _activity_log_max:
                     _activity_log.pop(0)
@@ -259,7 +332,7 @@ def _load_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
                 total_served = sum(info["count"] for info in _served_counts.values())
                 logger.info(
                     f"Loaded stats: {total_requests} requests, {total_served} served, "
-                    f"{len(_activity_log)} activity entries"
+                    f"{len(_activity_log)} activity entries, {len(_peer_bandwidth)} peers tracked"
                 )
     except Exception as e:
         logger.warning(f"Failed to load stats: {e}")
@@ -269,11 +342,21 @@ def _save_stats(stats_file: str = DEFAULT_STATS_FILE) -> None:
     """Save dashboard stats to disk."""
     try:
         os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+        # Save counters from metrics (not histograms)
+        metrics_to_save = {
+            key: _metrics[key] for key in [
+                "nars_served_total", "narinfos_served_total", "bytes_sent_total",
+                "bytes_received_total", "cache_hits_total", "cache_misses_total",
+                "peer_requests_total"
+            ]
+        }
         with open(stats_file, "w") as f:
             json.dump({
                 "request_counts": _request_counts,
                 "served_counts": _served_counts,
                 "activity_log": _activity_log,
+                "peer_bandwidth": _peer_bandwidth,
+                "metrics": metrics_to_save,
             }, f)
         logger.debug("Saved dashboard stats")
     except Exception as e:
@@ -772,6 +855,7 @@ async def narinfo_handler(request: Request) -> Response:
     if not is_localhost(request):
         return Response("Forbidden", status_code=403)
 
+    start_time = time.time()
     hash_part = request.path_params.get("hash", "")
     if not hash_part:
         return Response("Bad request", status_code=400)
@@ -789,12 +873,15 @@ async def narinfo_handler(request: Request) -> Response:
         drv_name = _extract_drv_name(narinfo.storePath)
         _track_request(hash_part, drv_name)
         _log_activity("check", hash_part, "local", True, name=drv_name)
+        _record_metric("cache_hits_total")
+        _record_metric("request_duration_seconds", time.time() - start_time, {"type": "local"})
         # Sign the narinfo before returning
         signed_narinfo = sign_narinfo(narinfo)
         return Response(signed_narinfo.dump(), media_type="text/x-nix-narinfo")
 
     # Try Iroh peers
     if _iroh_node and _iroh_node._known_peers:
+        _record_metric("peer_requests_total")
         result = await _iroh_node.fetch_narinfo_from_peers(hash_part, max_attempts=3)
         if result:
             narinfo_content, peer_id = result
@@ -804,6 +891,7 @@ async def narinfo_handler(request: Request) -> Response:
             drv_name = _extract_drv_name(peer_narinfo.storePath)
             _track_request(hash_part, drv_name)
             _log_activity("check", hash_part, f"peer:{peer_id[:8]}", True, name=drv_name)
+            _record_metric("request_duration_seconds", time.time() - start_time, {"type": "peer"})
             # Rewrite URL: original URL -> /iroh/nar/{peer_id}/{nar_hash_urlsafe}/{original_url}
             # Include NarHash in URL for verification after download (security)
             nar_hash_urlsafe = urllib.parse.quote(peer_narinfo.narHash, safe='')
@@ -811,8 +899,26 @@ async def narinfo_handler(request: Request) -> Response:
             rewritten_narinfo = peer_narinfo._replace(url=new_url)
             return Response(rewritten_narinfo.dump(), media_type="text/x-nix-narinfo")
 
+    # Try LAN discovery (UDP broadcast)
+    if _lan_discovery:
+        result = await _lan_discovery.discover_narinfo(hash_part)
+        if result:
+            narinfo_content, peer_addr, peer_port = result
+            logger.info(f"Got narinfo from LAN peer {peer_addr}:{peer_port}")
+            peer_narinfo = NarInfo.parse(narinfo_content)
+            drv_name = _extract_drv_name(peer_narinfo.storePath)
+            _track_request(hash_part, drv_name)
+            _log_activity("check", hash_part, f"lan:{peer_addr}", True, name=drv_name)
+            _record_metric("request_duration_seconds", time.time() - start_time, {"type": "lan"})
+            # Rewrite URL to proxy through LAN peer
+            new_url = f"lan/nar/{peer_addr}/{peer_port}/{peer_narinfo.url}"
+            rewritten_narinfo = peer_narinfo._replace(url=new_url)
+            return Response(rewritten_narinfo.dump(), media_type="text/x-nix-narinfo")
+
     _track_request(hash_part)
     _log_activity("check", hash_part, "miss", False)
+    _record_metric("cache_misses_total")
+    _record_metric("request_duration_seconds", time.time() - start_time, {"type": "miss"})
     return Response("Not found", status_code=404)
 
 
@@ -827,6 +933,7 @@ async def local_narinfo_handler(request: Request) -> Response:
         # Track as served to peer
         drv_name = _extract_drv_name(narinfo.storePath)
         _track_served(hash_part, drv_name)
+        _record_metric("narinfos_served_total")
         # Sign the narinfo before returning
         signed_narinfo = sign_narinfo(narinfo)
         return Response(signed_narinfo.dump(), media_type="text/x-nix-narinfo")
@@ -852,6 +959,8 @@ async def nar_handler(request: Request) -> Response:
                 total_bytes += len(chunk)
                 yield chunk
             _log_activity("download", hash_part, "local", True, total_bytes, name=drv_name)
+            _record_metric("nars_served_total")
+            _record_metric("bytes_sent_total", total_bytes)
 
         return StreamingResponse(stream_nar(), media_type="application/x-nix-nar")
     except FileNotFoundError:
@@ -937,6 +1046,8 @@ async def iroh_nar_handler(request: Request) -> Response:
             logger.warning(f"No expected hash for NAR verification (legacy URL format)")
 
         _log_activity("download", hash_part, f"peer:{peer_id[:8]}", True, len(nar_data), name=drv_name)
+        _record_metric("bytes_received_total", len(nar_data))
+        _record_peer_bandwidth(peer_id, bytes_received=len(nar_data))
 
         # Stream the buffered data to the HTTP response
         async def stream_buffered():
@@ -956,13 +1067,214 @@ async def iroh_nar_handler(request: Request) -> Response:
         return Response(f"Failed to fetch NAR: {e}", status_code=502)
 
 
+async def metrics_handler(request: Request) -> Response:
+    """
+    Prometheus metrics endpoint.
+
+    Returns metrics in Prometheus text format.
+    """
+    lines = []
+    uptime = time.time() - _health_state["start_time"]
+
+    # Basic info
+    lines.append(f"# HELP peerix_up Peerix is running")
+    lines.append(f"# TYPE peerix_up gauge")
+    lines.append(f"peerix_up 1")
+
+    lines.append(f"# HELP peerix_uptime_seconds Uptime in seconds")
+    lines.append(f"# TYPE peerix_uptime_seconds gauge")
+    lines.append(f"peerix_uptime_seconds {uptime:.0f}")
+
+    # Peers
+    peer_count = len(_iroh_node._known_peers) if _iroh_node else 0
+    lines.append(f"# HELP peerix_peers_connected Number of connected peers")
+    lines.append(f"# TYPE peerix_peers_connected gauge")
+    lines.append(f"peerix_peers_connected {peer_count}")
+
+    # Store
+    available = len(_store_manager.available_hashes) if _store_manager else 0
+    lines.append(f"# HELP peerix_available_hashes Number of available store path hashes")
+    lines.append(f"# TYPE peerix_available_hashes gauge")
+    lines.append(f"peerix_available_hashes {available}")
+
+    # Counters
+    lines.append(f"# HELP peerix_nars_served_total Total NARs served to peers")
+    lines.append(f"# TYPE peerix_nars_served_total counter")
+    lines.append(f"peerix_nars_served_total {_metrics['nars_served_total']}")
+
+    lines.append(f"# HELP peerix_narinfos_served_total Total narinfos served")
+    lines.append(f"# TYPE peerix_narinfos_served_total counter")
+    lines.append(f"peerix_narinfos_served_total {_metrics['narinfos_served_total']}")
+
+    lines.append(f"# HELP peerix_bytes_sent_total Total bytes sent to peers")
+    lines.append(f"# TYPE peerix_bytes_sent_total counter")
+    lines.append(f"peerix_bytes_sent_total {_metrics['bytes_sent_total']}")
+
+    lines.append(f"# HELP peerix_bytes_received_total Total bytes received from peers")
+    lines.append(f"# TYPE peerix_bytes_received_total counter")
+    lines.append(f"peerix_bytes_received_total {_metrics['bytes_received_total']}")
+
+    lines.append(f"# HELP peerix_cache_hits_total Cache hits (found locally)")
+    lines.append(f"# TYPE peerix_cache_hits_total counter")
+    lines.append(f"peerix_cache_hits_total {_metrics['cache_hits_total']}")
+
+    lines.append(f"# HELP peerix_cache_misses_total Cache misses (not found)")
+    lines.append(f"# TYPE peerix_cache_misses_total counter")
+    lines.append(f"peerix_cache_misses_total {_metrics['cache_misses_total']}")
+
+    lines.append(f"# HELP peerix_peer_requests_total Requests forwarded to peers")
+    lines.append(f"# TYPE peerix_peer_requests_total counter")
+    lines.append(f"peerix_peer_requests_total {_metrics['peer_requests_total']}")
+
+    lines.append(f"# HELP peerix_errors_total Total errors")
+    lines.append(f"# TYPE peerix_errors_total counter")
+    lines.append(f"peerix_errors_total {_health_state.get('errors_count', 0)}")
+
+    # Request counts from tracking
+    total_requests = sum(info["count"] for info in _request_counts.values())
+    total_served = sum(info["count"] for info in _served_counts.values())
+    lines.append(f"# HELP peerix_requests_total Total narinfo requests received")
+    lines.append(f"# TYPE peerix_requests_total counter")
+    lines.append(f"peerix_requests_total {total_requests}")
+
+    lines.append(f"# HELP peerix_served_total Total packages served to peers")
+    lines.append(f"# TYPE peerix_served_total counter")
+    lines.append(f"peerix_served_total {total_served}")
+
+    # Request duration histogram (simplified - just percentiles)
+    durations = _metrics.get("request_duration_seconds", [])
+    if durations:
+        sorted_d = sorted(d[0] for d in durations)
+        p50 = sorted_d[len(sorted_d) // 2] if sorted_d else 0
+        p90 = sorted_d[int(len(sorted_d) * 0.9)] if len(sorted_d) > 1 else p50
+        p99 = sorted_d[int(len(sorted_d) * 0.99)] if len(sorted_d) > 10 else p90
+        lines.append(f"# HELP peerix_request_duration_seconds Request duration")
+        lines.append(f"# TYPE peerix_request_duration_seconds summary")
+        lines.append(f'peerix_request_duration_seconds{{quantile="0.5"}} {p50:.4f}')
+        lines.append(f'peerix_request_duration_seconds{{quantile="0.9"}} {p90:.4f}')
+        lines.append(f'peerix_request_duration_seconds{{quantile="0.99"}} {p99:.4f}')
+        lines.append(f"peerix_request_duration_seconds_count {len(durations)}")
+        lines.append(f"peerix_request_duration_seconds_sum {sum(d[0] for d in durations):.4f}")
+
+    content = "\n".join(lines) + "\n"
+    return Response(content, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+async def health_handler(request: Request) -> Response:
+    """
+    Health check endpoint for systemd watchdog and load balancers.
+
+    Returns 200 if healthy, 503 if degraded.
+    Checks: local store, iroh node, recent activity.
+    """
+    checks = {
+        "local_store": False,
+        "iroh_node": False,
+        "store_manager": False,
+    }
+    healthy = True
+    details = []
+
+    # Check local store
+    if _local_store:
+        try:
+            cache = await _local_store.cache_info()
+            checks["local_store"] = bool(cache and cache.storeDir)
+        except Exception as e:
+            details.append(f"local_store error: {e}")
+            healthy = False
+    else:
+        details.append("local_store not initialized")
+        healthy = False
+
+    # Check Iroh node
+    if _iroh_node and _iroh_node._node_id:
+        checks["iroh_node"] = True
+    else:
+        details.append("iroh_node not ready")
+        # Not critical if running in LAN mode
+        if _iroh_node is not None:
+            healthy = False
+
+    # Check store manager
+    if _store_manager:
+        checks["store_manager"] = True
+        progress = _store_manager.get_scan_progress()
+        if progress.get("last_scan"):
+            _health_state["last_store_scan"] = progress["last_scan"]
+
+    # Build response
+    uptime = time.time() - _health_state["start_time"]
+    response = {
+        "status": "healthy" if healthy else "degraded",
+        "uptime_seconds": int(uptime),
+        "checks": checks,
+        "peers": len(_iroh_node._known_peers) if _iroh_node else 0,
+        "available_hashes": len(_store_manager.available_hashes) if _store_manager else 0,
+        "last_successful_operation": _health_state.get("last_successful_operation"),
+        "errors_count": _health_state.get("errors_count", 0),
+    }
+
+    if details:
+        response["details"] = details
+
+    status_code = 200 if healthy else 503
+    return JSONResponse(response, status_code=status_code)
+
+
+async def lan_nar_handler(request: Request) -> Response:
+    """
+    Proxy NAR from a LAN peer.
+
+    URL format: /lan/nar/{peer_addr}/{peer_port}/{original_nar_path}
+    """
+    if not is_localhost(request):
+        return Response("Forbidden", status_code=403)
+
+    peer_addr = request.path_params.get("peer_addr", "")
+    peer_port = request.path_params.get("peer_port", "")
+    nar_path = request.path_params.get("path", "")
+
+    if not peer_addr or not peer_port or not nar_path:
+        return Response("Bad request", status_code=400)
+
+    # Construct URL to LAN peer
+    nar_url = f"http://{peer_addr}:{peer_port}/{nar_path}"
+    logger.info(f"Fetching NAR from LAN peer: {nar_url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream("GET", nar_url) as resp:
+                if resp.status_code != 200:
+                    return Response(f"LAN peer returned {resp.status_code}", status_code=502)
+
+                async def stream_response():
+                    total = 0
+                    async for chunk in resp.aiter_bytes(65536):
+                        total += len(chunk)
+                        yield chunk
+                    _record_metric("bytes_received_total", total)
+                    _log_activity("download", "?", f"lan:{peer_addr}", True, total)
+
+                return StreamingResponse(
+                    stream_response(),
+                    media_type="application/x-nix-nar"
+                )
+
+    except Exception as e:
+        logger.error(f"Failed to fetch from LAN peer {peer_addr}: {e}")
+        return Response(f"LAN fetch failed: {e}", status_code=502)
+
+
 async def status_handler(request: Request) -> Response:
     """Return node status."""
+    mode = "iroh" if _iroh_node else ("lan" if _lan_discovery else "unknown")
     status = {
-        "mode": "iroh",
+        "mode": mode,
         "node_id": _iroh_node._node_id if _iroh_node else None,
         "known_peers": len(_iroh_node._known_peers) if _iroh_node else 0,
         "tracker_url": _iroh_node.tracker_url if _iroh_node else None,
+        "lan_discovery": _lan_discovery is not None,
     }
 
     if _iroh_node and _iroh_node.net:
@@ -1132,6 +1444,31 @@ async def dashboard_stats_handler(request: Request) -> Response:
 
     # Add activity log (most recent first)
     stats["activity"] = list(reversed(_activity_log[-20:]))
+
+    # Add per-peer bandwidth stats (top 10 by total bytes)
+    sorted_peers = sorted(
+        _peer_bandwidth.items(),
+        key=lambda x: x[1]["bytes_sent"] + x[1]["bytes_received"],
+        reverse=True
+    )[:10]
+    stats["peer_bandwidth"] = [
+        {
+            "peer_id": pid,
+            "bytes_sent": info["bytes_sent"],
+            "bytes_received": info["bytes_received"],
+            "requests": info["requests"],
+            "last_seen": info["last_seen"],
+        }
+        for pid, info in sorted_peers
+    ]
+
+    # Add peer reputation stats from Iroh node
+    if _iroh_node:
+        stats["peer_reputation"] = _iroh_node.get_peer_stats()
+
+    # Add total bandwidth
+    stats["total_bytes_sent"] = _metrics["bytes_sent_total"]
+    stats["total_bytes_received"] = _metrics["bytes_received_total"]
 
     return JSONResponse(stats)
 
@@ -1529,11 +1866,14 @@ async def dashboard_handler(request: Request) -> Response:
 def create_app() -> Starlette:
     """Create the Starlette application."""
     routes = [
+        Route("/health", health_handler),
+        Route("/metrics", metrics_handler),
         Route("/nix-cache-info", nix_cache_info),
         Route("/{hash}.narinfo", narinfo_handler),
         Route("/local/{hash}.narinfo", local_narinfo_handler),
         Route("/nar/{path:path}", nar_handler),
         Route("/iroh/nar/{peer_id}/{nar_hash}/{path:path}", iroh_nar_handler),
+        Route("/lan/nar/{peer_addr}/{peer_port:int}/{path:path}", lan_nar_handler),
         Route("/status", status_handler),
         Route("/peers", peers_handler),
         Route("/scan-status", scan_status_handler),
@@ -1561,6 +1901,7 @@ async def run_server(
     no_verify: bool = False,
     upstream_cache: str = "https://cache.nixos.org",
     filter_concurrency: int = 10,
+    lan_discovery: bool = False,
 ):
     """
     Run the Iroh-based peerix server.
@@ -1580,8 +1921,9 @@ async def run_server(
         no_verify: Disable hash verification against upstream cache
         upstream_cache: Upstream cache URL for verification
         filter_concurrency: Max concurrent requests when filtering (default: 10)
+        lan_discovery: Enable LAN peer discovery via UDP broadcast
     """
-    global _iroh_node, _local_store, _cache_priority, _store_manager
+    global _iroh_node, _local_store, _cache_priority, _store_manager, _lan_discovery
     _cache_priority = priority
     _nixpkgs_filter = None  # Track for cleanup
     _verified_store = None  # Track for cleanup
@@ -1647,6 +1989,9 @@ async def run_server(
             """Track NAR served via iroh protocol."""
             _track_served(hash_part, name, peer_id)
             _log_activity("served", hash_part, "to-peer", True, size, name=name, peer_id=peer_id)
+            _record_metric("nars_served_total")
+            _record_metric("bytes_sent_total", size)
+            _record_peer_bandwidth(peer_id, bytes_sent=size)
 
         # Start Iroh node (use serving_store which has filtering/verification applied)
         _iroh_node = IrohNode(
@@ -1678,6 +2023,13 @@ async def run_server(
                     filter_concurrency=filter_concurrency,
                 )
                 logger.info(f"Store manager initialized (scan runs in background, concurrency={filter_concurrency})")
+
+            # Initialize LAN discovery if enabled
+            if lan_discovery:
+                from .lan_discovery import LANDiscovery
+                _lan_discovery = LANDiscovery(serving_store, port=port)
+                await _lan_discovery.start()
+                logger.info("LAN discovery enabled (UDP broadcast)")
 
             # Create and run HTTP server
             app = create_app()
@@ -1748,6 +2100,9 @@ async def run_server(
                 await _nixpkgs_filter.close()
             if _verified_store:
                 await _verified_store.close()
+            if _lan_discovery:
+                await _lan_discovery.stop()
+                _lan_discovery = None
             await _iroh_node.stop()
             _iroh_node = None
             _local_store = None
@@ -1756,42 +2111,77 @@ async def run_server(
 def main():
     """CLI entry point."""
     import argparse
+    from .config import load_config, apply_config_to_args
 
     parser = argparse.ArgumentParser(description="Iroh-based Peerix server")
-    parser.add_argument("--port", "-p", type=int, default=12304,
+    parser.add_argument("--config", "-c", type=str,
+                        help="Path to config file (default: ~/.config/peerix/config.toml)")
+    parser.add_argument("--port", "-p", type=int,
                         help="HTTP port (default: 12304)")
     parser.add_argument("--tracker", "-t", type=str,
-                        help="Tracker URL for peer discovery")
+                        help="Tracker URL for peer discovery (default: https://sophronesis.dev/peerix)")
     parser.add_argument("--peer-id", type=str,
                         help="Human-readable peer ID (default: hostname)")
-    parser.add_argument("--priority", type=int, default=5,
+    parser.add_argument("--priority", type=int,
                         help="Cache priority (default: 5)")
-    parser.add_argument("--timeout", type=float, default=10.0,
+    parser.add_argument("--timeout", type=float,
                         help="Connection timeout in seconds (default: 10)")
     parser.add_argument("--state-dir", type=str,
                         help="Directory for persistent state (default: /var/lib/peerix)")
     parser.add_argument("--private-key", type=str,
                         help="Path to nix secret key file for signing narinfo")
-    parser.add_argument("--scan-interval", type=int, default=3600,
+    parser.add_argument("--scan-interval", type=int,
                         help="Seconds between store scans (0 to disable, default: 3600)")
     parser.add_argument("--no-filter", action="store_true",
                         help="Disable package filtering")
-    parser.add_argument("--filter-mode", type=str, default="nixpkgs",
-                        choices=["nixpkgs", "rules"],
+    parser.add_argument("--filter-mode", type=str, choices=["nixpkgs", "rules"],
                         help="Filter mode: nixpkgs (only cache.nixos.org packages) or rules (pattern-based)")
     parser.add_argument("--filter-pattern", type=str, action="append", dest="filter_patterns",
                         help="Additional filter pattern (can be specified multiple times)")
     parser.add_argument("--no-verify", action="store_true",
                         help="Disable hash verification against upstream cache")
-    parser.add_argument("--upstream-cache", type=str, default="https://cache.nixos.org",
+    parser.add_argument("--upstream-cache", type=str,
                         help="Upstream cache URL for verification (default: https://cache.nixos.org)")
-    parser.add_argument("--filter-concurrency", type=int, default=10,
+    parser.add_argument("--filter-concurrency", type=int,
                         help="Max concurrent requests when filtering hashes (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose logging")
+    parser.add_argument("--lan-discovery", action="store_true",
+                        help="Enable LAN peer discovery via UDP broadcast (supplements Iroh)")
     parser.add_argument("--allow-insecure-http", action="store_true",
                         help="Allow HTTP (non-TLS) connections to tracker/upstream (INSECURE, for testing only)")
     args = parser.parse_args()
+
+    # Mark which args were explicitly set via CLI
+    # (used by apply_config_to_args to know what to override)
+    for arg in ['port', 'tracker', 'peer_id', 'priority', 'timeout', 'private_key',
+                'scan_interval', 'filter_mode', 'filter_concurrency', 'upstream_cache',
+                'no_filter', 'no_verify', 'verbose', 'allow_insecure_http']:
+        if getattr(args, arg, None) is not None:
+            setattr(args, f'_cli_{arg}', True)
+
+    # Load config file and apply defaults where CLI didn't override
+    config_path = Path(args.config) if args.config else None
+    config = load_config(config_path)
+    apply_config_to_args(args, config)
+
+    # Apply final defaults for any still-None values
+    if args.port is None:
+        args.port = 12304
+    if args.priority is None:
+        args.priority = 5
+    if args.timeout is None:
+        args.timeout = 10.0
+    if args.scan_interval is None:
+        args.scan_interval = 3600
+    if args.filter_mode is None:
+        args.filter_mode = "nixpkgs"
+    if args.filter_concurrency is None:
+        args.filter_concurrency = 10
+    if args.upstream_cache is None:
+        args.upstream_cache = "https://cache.nixos.org"
+    if args.tracker is None:
+        args.tracker = "https://sophronesis.dev/peerix"
 
     # Security: Enforce TLS for tracker and upstream cache URLs
     # Unless explicitly disabled with --allow-insecure-http
@@ -1838,6 +2228,7 @@ def main():
             no_verify=args.no_verify,
             upstream_cache=args.upstream_cache,
             filter_concurrency=args.filter_concurrency,
+            lan_discovery=args.lan_discovery,
         ))
     except KeyboardInterrupt:
         logger.info("Interrupted")

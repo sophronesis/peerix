@@ -179,6 +179,16 @@ in
           Default: 5 (higher priority than cache.nixos.org which is 10).
         '';
       };
+
+      lanDiscovery = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable LAN peer discovery via UDP broadcast.
+          This supplements Iroh mode by also checking local network peers.
+          Useful for mixed environments where some peers are on the same LAN.
+        '';
+      };
     };
 
     # Tracker service (separate top-level for clarity)
@@ -282,7 +292,8 @@ in
             --state-dir /var/lib/peerix \
             ${lib.optionalString cfg.noFilter "--no-filter"} \
             ${lib.optionalString cfg.noVerify "--no-verify"} \
-            ${lib.optionalString cfg.allowInsecureHttp "--allow-insecure-http"}
+            ${lib.optionalString cfg.allowInsecureHttp "--allow-insecure-http"} \
+            ${lib.optionalString cfg.lanDiscovery "--lan-discovery"}
         '' else ''
           # LAN mode: UDP broadcast, local network only
           export PATH="${pkgs.nix}/bin:${pkgs.nix-serve}/bin:$PATH"

@@ -9,8 +9,9 @@ import asyncio
 import logging
 import os
 import secrets
+import time
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -77,6 +78,126 @@ class PeerInfo:
     """Information about a peer."""
     node_id: str  # Public key (base32)
     addrs: t.List[str]  # Known addresses (for bootstrapping)
+
+
+@dataclass
+class PeerReputation:
+    """
+    Track per-peer reputation including failures, success rates, and latency.
+
+    Combines backoff logic with reputation scoring for peer prioritization.
+    """
+    # Backoff tracking
+    consecutive_failures: int = 0
+    last_failure: float = 0.0
+    backoff_until: float = 0.0
+
+    # Reputation metrics
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    total_bytes_transferred: int = 0
+    total_latency_ms: float = 0.0  # Cumulative latency for averaging
+    last_seen: float = field(default_factory=time.time)
+
+    def record_failure(self, latency_ms: float = 0.0) -> float:
+        """Record a failure and return backoff duration in seconds."""
+        self.consecutive_failures += 1
+        self.failed_requests += 1
+        self.total_requests += 1
+        self.last_failure = time.time()
+        self.last_seen = self.last_failure
+        if latency_ms > 0:
+            self.total_latency_ms += latency_ms
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
+        backoff = min(60.0, 1.0 * (2 ** min(self.consecutive_failures - 1, 6)))
+        self.backoff_until = self.last_failure + backoff
+        return backoff
+
+    def record_success(self, bytes_transferred: int = 0, latency_ms: float = 0.0):
+        """Record a success, reducing consecutive failure count."""
+        self.consecutive_failures = max(0, self.consecutive_failures - 1)
+        self.successful_requests += 1
+        self.total_requests += 1
+        self.total_bytes_transferred += bytes_transferred
+        self.last_seen = time.time()
+        if latency_ms > 0:
+            self.total_latency_ms += latency_ms
+        self.backoff_until = 0.0
+
+    def is_backed_off(self) -> bool:
+        """Check if peer is currently in backoff period."""
+        return time.time() < self.backoff_until
+
+    def remaining_backoff(self) -> float:
+        """Return remaining backoff time in seconds."""
+        return max(0.0, self.backoff_until - time.time())
+
+    @property
+    def success_rate(self) -> float:
+        """Return success rate as a ratio (0.0 to 1.0)."""
+        if self.total_requests == 0:
+            return 0.5  # Neutral for new peers
+        return self.successful_requests / self.total_requests
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Return average latency in milliseconds."""
+        if self.total_requests == 0:
+            return 0.0
+        return self.total_latency_ms / self.total_requests
+
+    def score(self) -> float:
+        """
+        Calculate reputation score (higher is better).
+
+        Combines success rate, latency, and recency.
+        Score range: 0.0 to 1.0
+        """
+        # Base score from success rate (0-0.6 weight)
+        base_score = self.success_rate * 0.6
+
+        # Latency factor (faster is better, 0-0.2 weight)
+        # Assume <100ms is excellent, >1000ms is poor
+        if self.avg_latency_ms > 0:
+            latency_factor = max(0, min(1, (1000 - self.avg_latency_ms) / 1000)) * 0.2
+        else:
+            latency_factor = 0.1  # Neutral
+
+        # Recency factor (recently active is better, 0-0.2 weight)
+        age = time.time() - self.last_seen
+        recency_factor = max(0, min(1, (3600 - age) / 3600)) * 0.2  # 1 hour window
+
+        return base_score + latency_factor + recency_factor
+
+    def to_dict(self) -> dict:
+        """Serialize to dict for persistence."""
+        return {
+            "consecutive_failures": self.consecutive_failures,
+            "total_requests": self.total_requests,
+            "successful_requests": self.successful_requests,
+            "failed_requests": self.failed_requests,
+            "total_bytes_transferred": self.total_bytes_transferred,
+            "total_latency_ms": self.total_latency_ms,
+            "last_seen": self.last_seen,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PeerReputation":
+        """Deserialize from dict."""
+        return cls(
+            consecutive_failures=data.get("consecutive_failures", 0),
+            total_requests=data.get("total_requests", 0),
+            successful_requests=data.get("successful_requests", 0),
+            failed_requests=data.get("failed_requests", 0),
+            total_bytes_transferred=data.get("total_bytes_transferred", 0),
+            total_latency_ms=data.get("total_latency_ms", 0.0),
+            last_seen=data.get("last_seen", time.time()),
+        )
+
+
+# Alias for backward compatibility
+PeerBackoff = PeerReputation
 
 
 class NarinfoProtocol(iroh.ProtocolHandler):
@@ -269,6 +390,8 @@ class IrohNode:
         # Connection pool: (node_id, protocol) -> Connection
         self._connection_pool: t.Dict[t.Tuple[str, bytes], iroh.Connection] = {}
         self._pool_lock = asyncio.Lock()
+        # Per-peer backoff tracking
+        self._peer_backoff: t.Dict[str, PeerBackoff] = {}
         # Tracking callbacks
         self._on_served = on_served  # Called when narinfo served: (hash, name)
         self._on_nar_served = on_nar_served  # Called when NAR served: (hash, name, size)
@@ -320,8 +443,27 @@ class IrohNode:
         return self._node_id
 
     async def stop(self):
-        """Stop the Iroh node."""
+        """Stop the Iroh node with graceful deregistration."""
         self._running = False
+
+        # Deregister from tracker first
+        if self.tracker_url:
+            try:
+                await asyncio.wait_for(self.deregister_from_tracker(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Tracker deregistration timed out")
+            except Exception as e:
+                logger.warning(f"Tracker deregistration error: {e}")
+
+        # Close HTTP client
+        if self._http_client:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+
+        # Stop Iroh node
         if self.node:
             try:
                 await asyncio.wait_for(self.node.shutdown(), timeout=5.0)
@@ -538,6 +680,7 @@ class IrohNode:
         last_error = None
 
         for attempt in range(max_retries):
+            start_time = time.time()
             try:
                 # Use pooled connection
                 conn = await self.get_pooled_connection(node_id, NAR_PROTOCOL)
@@ -578,7 +721,13 @@ class IrohNode:
                         logger.info(f"NAR progress: {bytes_received}/{expected_size} bytes")
 
                 nar_data = b''.join(chunks)
+                elapsed_ms = (time.time() - start_time) * 1000 if 'start_time' in dir() else 0
                 logger.info(f"NAR fetch complete: {len(nar_data)} bytes from {node_id[:16]}...")
+                # Record success with bytes transferred and latency
+                self._get_peer_reputation(node_id).record_success(
+                    bytes_transferred=len(nar_data),
+                    latency_ms=elapsed_ms
+                )
                 return nar_data
 
             except Exception as e:
@@ -593,12 +742,44 @@ class IrohNode:
                     logger.info(f"Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
 
+        # Record final failure for backoff
+        self._get_peer_backoff(node_id).record_failure()
         raise RuntimeError(f"Failed to fetch NAR after {max_retries} attempts: {last_error}")
+
+    def _get_peer_reputation(self, node_id: str) -> PeerReputation:
+        """Get or create PeerReputation for a node."""
+        if node_id not in self._peer_backoff:
+            self._peer_backoff[node_id] = PeerReputation()
+        return self._peer_backoff[node_id]
+
+    # Alias for backward compatibility
+    _get_peer_backoff = _get_peer_reputation
+
+    def get_peer_stats(self) -> t.List[t.Dict]:
+        """Get reputation stats for all known peers."""
+        stats = []
+        for node_id in self._known_peers:
+            rep = self._get_peer_reputation(node_id)
+            stats.append({
+                "node_id": node_id,
+                "node_id_short": node_id[:16] + "...",
+                "score": rep.score(),
+                "success_rate": rep.success_rate,
+                "avg_latency_ms": rep.avg_latency_ms,
+                "total_requests": rep.total_requests,
+                "bytes_transferred": rep.total_bytes_transferred,
+                "backed_off": rep.is_backed_off(),
+                "last_seen": rep.last_seen,
+            })
+        return sorted(stats, key=lambda x: x["score"], reverse=True)
 
     async def fetch_narinfo_from_peers(self, nar_hash: str,
                                        max_attempts: int = 3) -> t.Optional[t.Tuple[str, str]]:
         """
         Try to fetch narinfo from known peers with fallback.
+
+        Uses per-peer reputation and exponential backoff to prioritize
+        reliable, fast peers and avoid repeatedly hitting failed/slow peers.
 
         Args:
             nar_hash: The store path hash to look up
@@ -608,26 +789,55 @@ class IrohNode:
             Tuple of (narinfo_content, node_id) if found, None otherwise
         """
         attempts = 0
-        for node_id in list(self._known_peers.keys()):
+        skipped = 0
+
+        # Sort peers by reputation score (higher is better), excluding backed-off peers
+        sorted_peers = sorted(
+            self._known_peers.keys(),
+            key=lambda nid: (
+                self._get_peer_reputation(nid).is_backed_off(),  # Non-backed-off first
+                -self._get_peer_reputation(nid).score(),  # Higher score first
+            )
+        )
+
+        for node_id in sorted_peers:
             if attempts >= max_attempts:
                 break
 
-            attempts += 1
-            logger.debug(f"Trying peer {node_id[:16]}... ({attempts}/{max_attempts})")
+            # Skip peers in backoff period
+            rep = self._get_peer_reputation(node_id)
+            if rep.is_backed_off():
+                remaining = rep.remaining_backoff()
+                logger.debug(f"Peer {node_id[:16]}... in backoff ({remaining:.1f}s remaining), skipping")
+                skipped += 1
+                continue
 
+            attempts += 1
+            logger.debug(f"Trying peer {node_id[:16]}... (score={rep.score():.2f}, {attempts}/{max_attempts})")
+
+            start_time = time.time()
             try:
                 narinfo = await self.fetch_narinfo(node_id, nar_hash)
+                latency_ms = (time.time() - start_time) * 1000
                 if narinfo:
-                    logger.info(f"Got narinfo from {node_id[:16]}...")
+                    logger.info(f"Got narinfo from {node_id[:16]}... ({latency_ms:.0f}ms)")
+                    rep.record_success(latency_ms=latency_ms)
                     return (narinfo, node_id)
             except asyncio.TimeoutError:
-                logger.debug(f"Peer {node_id[:16]}... timed out, trying next")
+                latency_ms = (time.time() - start_time) * 1000
+                wait = rep.record_failure(latency_ms=latency_ms)
+                logger.debug(f"Peer {node_id[:16]}... timed out ({latency_ms:.0f}ms), backoff {wait:.1f}s")
                 continue
             except Exception as e:
-                logger.debug(f"Peer {node_id[:16]}... failed: {e}, trying next")
+                latency_ms = (time.time() - start_time) * 1000
+                wait = rep.record_failure(latency_ms=latency_ms)
+                logger.debug(f"Peer {node_id[:16]}... failed: {e}, backoff {wait:.1f}s")
                 continue
 
-        logger.debug(f"No peer had narinfo for {nar_hash}")
+        if skipped > 0:
+            logger.debug(f"No peer had narinfo for {nar_hash} (skipped {skipped} backed-off peers)")
+        else:
+            logger.debug(f"No peer had narinfo for {nar_hash}")
         return None
 
     # ========== Tracker Integration ==========
@@ -668,6 +878,31 @@ class IrohNode:
 
         except Exception as e:
             logger.warning(f"Tracker announce error: {e}")
+            return False
+
+    async def deregister_from_tracker(self) -> bool:
+        """
+        Deregister from tracker on graceful shutdown.
+
+        This allows other peers to immediately know we're offline
+        instead of waiting for TTL expiration.
+        """
+        if not self.tracker_url or not self._http_client:
+            return False
+
+        try:
+            resp = await self._http_client.delete(
+                f"{self.tracker_url}/iroh/peer/{self._node_id}",
+                timeout=5.0,
+            )
+            if resp.status_code in (200, 204, 404):
+                logger.info(f"Deregistered from tracker: {self._node_id[:16]}...")
+                return True
+            else:
+                logger.warning(f"Tracker deregister failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            logger.warning(f"Tracker deregister error: {e}")
             return False
 
     async def discover_peers(self) -> t.List[t.Dict]:

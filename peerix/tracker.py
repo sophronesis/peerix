@@ -592,6 +592,36 @@ def create_tracker_app(db_path: str) -> Starlette:
             "last_seen": row[4],
         })
 
+    @app.route("/iroh/peer/{node_id:str}", methods=["DELETE"])
+    async def iroh_delete_peer(req: Request) -> Response:
+        """
+        Deregister an Iroh peer (graceful shutdown).
+
+        This allows peers to immediately notify the tracker they're going
+        offline, rather than waiting for TTL expiration.
+        """
+        node_id = req.path_params["node_id"]
+
+        # Delete from iroh_peers
+        cursor = conn.execute(
+            "DELETE FROM iroh_peers WHERE node_id = ?",
+            (node_id,)
+        )
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return JSONResponse({"status": "not found"}, status_code=404)
+
+        # Also clean up any packages registered by this peer
+        conn.execute(
+            "DELETE FROM packages WHERE peer_id = ?",
+            (node_id,)
+        )
+        conn.commit()
+
+        logger.info(f"Iroh peer deregistered: {node_id[:16]}...")
+        return JSONResponse({"status": "deregistered"})
+
     return app
 
 

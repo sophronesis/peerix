@@ -8,8 +8,7 @@ import tomllib
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
-
+from typing import Optional, List
 
 logger = logging.getLogger("peerix.config")
 
@@ -17,51 +16,86 @@ CONFIG_PATH = Path.home() / ".config" / "peerix" / "config.toml"
 
 
 @dataclass
-class DaemonConfig:
+class ServerConfig:
+    """HTTP server configuration."""
     port: int = 12304
-    timeout: int = 50
-    mode: str = "ipfs"
-    verbose: bool = False
     priority: int = 5
+    timeout: float = 10.0
+    verbose: bool = False
 
 
 @dataclass
-class IpfsConfig:
-    tracker_url: Optional[str] = None
+class TrackerConfig:
+    """Tracker and peer discovery configuration."""
+    url: Optional[str] = "https://sophronesis.dev/peerix"
+    peer_id: Optional[str] = None  # Default: hostname
+
+
+@dataclass
+class StoreConfig:
+    """Store scanning and filtering configuration."""
     scan_interval: int = 3600
-    concurrency: int = 10
+    filter_mode: str = "nixpkgs"  # "nixpkgs" or "rules"
+    filter_concurrency: int = 10
+    filter_patterns: List[str] = field(default_factory=list)
+    no_filter: bool = False
+    no_verify: bool = False
+    upstream_cache: str = "https://cache.nixos.org"
 
 
 @dataclass
 class SigningConfig:
+    """NAR signing configuration."""
     private_key: Optional[str] = None
 
 
 @dataclass
+class SecurityConfig:
+    """Security-related settings."""
+    allow_insecure_http: bool = False
+
+
+@dataclass
 class PeerixConfig:
-    daemon: DaemonConfig = field(default_factory=DaemonConfig)
-    ipfs: IpfsConfig = field(default_factory=IpfsConfig)
+    """Complete peerix configuration."""
+    server: ServerConfig = field(default_factory=ServerConfig)
+    tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    store: StoreConfig = field(default_factory=StoreConfig)
     signing: SigningConfig = field(default_factory=SigningConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
 DEFAULT_CONFIG_CONTENT = """\
 # Peerix configuration file
 # https://github.com/sophronesis/peerix
+#
+# Mode is determined by tracker.url:
+#   - url set (default) → Iroh mode (P2P with NAT traversal)
+#   - url = "" or not set → LAN mode (UDP broadcast)
 
-[daemon]
+[server]
 port = 12304
-timeout = 50
-mode = "ipfs"  # "ipfs" or "lan"
+priority = 5           # Lower = higher priority (cache.nixos.org is 10)
+timeout = 10.0         # Connection timeout in seconds
 verbose = false
-priority = 5  # Lower = higher priority (cache.nixos.org is 10)
 
-[ipfs]
-# tracker_url = "http://tracker.example.com:12305"
-scan_interval = 3600  # Seconds between store scans (0 to disable)
-concurrency = 10  # Parallel IPFS uploads
+[tracker]
+url = "https://sophronesis.dev/peerix"
+# peer_id = "my-hostname"  # Default: system hostname
+
+[store]
+scan_interval = 3600   # Seconds between store scans (0 to disable)
+filter_mode = "nixpkgs"  # "nixpkgs" (only cache.nixos.org packages) or "rules"
+filter_concurrency = 10
+no_filter = false
+no_verify = false
+upstream_cache = "https://cache.nixos.org"
 
 [signing]
-# private_key = "/path/to/key.pem"
+# private_key = "/path/to/cache-priv-key.pem"
+
+[security]
+allow_insecure_http = false  # Allow HTTP (non-TLS) - INSECURE
 """
 
 
@@ -75,7 +109,7 @@ def create_default_config(path: Path) -> None:
         logger.warning(f"Failed to create default config: {e}")
 
 
-def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> PeerixConfig:
+def load_config(path: Optional[Path] = None, create_if_missing: bool = False) -> PeerixConfig:
     """
     Load configuration from TOML file.
 
@@ -97,14 +131,18 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
 
-        daemon_data = data.get("daemon", {})
-        ipfs_data = data.get("ipfs", {})
+        server_data = data.get("server", {})
+        tracker_data = data.get("tracker", {})
+        store_data = data.get("store", {})
         signing_data = data.get("signing", {})
+        security_data = data.get("security", {})
 
         config = PeerixConfig(
-            daemon=DaemonConfig(**daemon_data),
-            ipfs=IpfsConfig(**ipfs_data),
+            server=ServerConfig(**server_data),
+            tracker=TrackerConfig(**tracker_data),
+            store=StoreConfig(**store_data),
             signing=SigningConfig(**signing_data),
+            security=SecurityConfig(**security_data),
         )
 
         logger.info(f"Loaded config from {config_path}")
@@ -121,26 +159,12 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         return PeerixConfig()
 
 
-# Default values used by argparse (for detecting if CLI arg was provided)
-CLI_DEFAULTS = {
-    "port": 12304,
-    "timeout": 50,
-    "mode": "ipfs",
-    "loglevel": logging.INFO,
-    "priority": 5,
-    "tracker_url": None,
-    "scan_interval": 3600,
-    "ipfs_concurrency": 10,
-    "private_key": None,
-}
-
-
-def merge_args_with_config(args, config: PeerixConfig) -> None:
+def apply_config_to_args(args, config: PeerixConfig) -> None:
     """
-    Merge CLI arguments with config file values.
+    Apply config file values to args where CLI didn't override.
 
     CLI arguments take precedence. Config values are only applied
-    if the CLI argument is at its default value.
+    if the CLI argument wasn't explicitly set.
 
     Modifies args in place.
 
@@ -148,34 +172,42 @@ def merge_args_with_config(args, config: PeerixConfig) -> None:
         args: argparse Namespace object
         config: PeerixConfig loaded from file
     """
-    # Daemon settings
-    if getattr(args, "port", CLI_DEFAULTS["port"]) == CLI_DEFAULTS["port"]:
-        args.port = config.daemon.port
+    # Server settings
+    if not hasattr(args, '_cli_port'):
+        args.port = config.server.port
+    if not hasattr(args, '_cli_priority'):
+        args.priority = config.server.priority
+    if not hasattr(args, '_cli_timeout'):
+        args.timeout = config.server.timeout
+    if not hasattr(args, '_cli_verbose') and config.server.verbose:
+        args.verbose = True
 
-    if getattr(args, "timeout", CLI_DEFAULTS["timeout"]) == CLI_DEFAULTS["timeout"]:
-        args.timeout = config.daemon.timeout
+    # Tracker settings
+    if not hasattr(args, '_cli_tracker'):
+        args.tracker = config.tracker.url
+    if not hasattr(args, '_cli_peer_id'):
+        args.peer_id = config.tracker.peer_id
 
-    if getattr(args, "mode", CLI_DEFAULTS["mode"]) == CLI_DEFAULTS["mode"]:
-        args.mode = config.daemon.mode
-
-    if getattr(args, "priority", CLI_DEFAULTS["priority"]) == CLI_DEFAULTS["priority"]:
-        args.priority = config.daemon.priority
-
-    # Verbose/loglevel - config can enable verbose mode
-    if getattr(args, "loglevel", CLI_DEFAULTS["loglevel"]) == CLI_DEFAULTS["loglevel"]:
-        if config.daemon.verbose:
-            args.loglevel = logging.DEBUG
-
-    # IPFS settings
-    if getattr(args, "tracker_url", CLI_DEFAULTS["tracker_url"]) == CLI_DEFAULTS["tracker_url"]:
-        args.tracker_url = config.ipfs.tracker_url
-
-    if getattr(args, "scan_interval", CLI_DEFAULTS["scan_interval"]) == CLI_DEFAULTS["scan_interval"]:
-        args.scan_interval = config.ipfs.scan_interval
-
-    if getattr(args, "ipfs_concurrency", CLI_DEFAULTS["ipfs_concurrency"]) == CLI_DEFAULTS["ipfs_concurrency"]:
-        args.ipfs_concurrency = config.ipfs.concurrency
+    # Store settings
+    if not hasattr(args, '_cli_scan_interval'):
+        args.scan_interval = config.store.scan_interval
+    if not hasattr(args, '_cli_filter_mode'):
+        args.filter_mode = config.store.filter_mode
+    if not hasattr(args, '_cli_filter_concurrency'):
+        args.filter_concurrency = config.store.filter_concurrency
+    if not hasattr(args, '_cli_no_filter') and config.store.no_filter:
+        args.no_filter = True
+    if not hasattr(args, '_cli_no_verify') and config.store.no_verify:
+        args.no_verify = True
+    if not hasattr(args, '_cli_upstream_cache'):
+        args.upstream_cache = config.store.upstream_cache
+    if config.store.filter_patterns and not getattr(args, 'filter_patterns', None):
+        args.filter_patterns = config.store.filter_patterns
 
     # Signing settings
-    if getattr(args, "private_key", CLI_DEFAULTS["private_key"]) == CLI_DEFAULTS["private_key"]:
+    if not hasattr(args, '_cli_private_key'):
         args.private_key = config.signing.private_key
+
+    # Security settings
+    if not hasattr(args, '_cli_allow_insecure_http') and config.security.allow_insecure_http:
+        args.allow_insecure_http = True
