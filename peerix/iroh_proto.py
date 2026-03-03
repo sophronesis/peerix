@@ -298,13 +298,20 @@ class NarProtocol(iroh.ProtocolHandler):
             # Log hash for debugging (compute same way as verification)
             import hashlib
             sha256_digest = hashlib.sha256(nar_data).digest()
-            NIX_BASE32 = "0123456789abcdfghjklmnpqrstvwxyz"
-            bits = int.from_bytes(sha256_digest, 'big')
+            # Nix base32 alphabet: excludes e, o, u, t (has i instead)
+            NIX_BASE32 = "0123456789abcdfghijklmnpqrsvwxyz"
+            n_bytes = len(sha256_digest)
+            n_chars = (n_bytes * 8 - 1) // 5 + 1
             result = []
-            for _ in range(52):
-                result.append(NIX_BASE32[bits & 0x1f])
-                bits >>= 5
-            sender_hash = f"sha256:{''.join(reversed(result))[:52]}"
+            for n in range(n_chars - 1, -1, -1):
+                b = n * 5
+                i = b // 8
+                j = b % 8
+                c = sha256_digest[i] >> j if i < n_bytes else 0
+                if i + 1 < n_bytes:
+                    c |= sha256_digest[i + 1] << (8 - j)
+                result.append(NIX_BASE32[c & 0x1f])
+            sender_hash = f"sha256:{''.join(result)}"
             logger.info(f"NAR serving: {nar_size} bytes, hash={sender_hash}, "
                        f"first16={nar_data[:16].hex()}, last16={nar_data[-16:].hex()}")
 

@@ -31,21 +31,32 @@ def compute_nar_hash(data: bytes) -> str:
     """
     Compute NarHash in Nix format: sha256:base32_encoded_hash
 
-    Nix uses a custom base32 alphabet (no padding, specific chars).
+    Nix uses a custom base32 alphabet (excludes E, O, U, T).
+    The encoding iterates from highest to lowest position, outputting forwards.
     """
     sha256_digest = hashlib.sha256(data).digest()
-    # Nix base32 alphabet (different from standard!)
-    NIX_BASE32_CHARS = "0123456789abcdfghjklmnpqrstvwxyz"
+    # Nix base32 alphabet: excludes e, o, u, t (has i instead)
+    NIX_BASE32_CHARS = "0123456789abcdfghijklmnpqrsvwxyz"
 
-    # Convert to Nix base32 (big-endian, no padding)
+    n_bytes = len(sha256_digest)
+    n_chars = (n_bytes * 8 - 1) // 5 + 1 if n_bytes > 0 else 0
+
     result = []
-    # Process 5 bits at a time from the hash
-    bits = int.from_bytes(sha256_digest, 'big')
-    for _ in range(52):  # 256 bits / 5 = 51.2, so 52 chars
-        result.append(NIX_BASE32_CHARS[bits & 0x1f])
-        bits >>= 5
+    # Iterate backwards from highest index, building string forwards
+    for n in range(n_chars - 1, -1, -1):
+        b = n * 5
+        i = b // 8
+        j = b % 8
 
-    return f"sha256:{(''.join(reversed(result)))[:52]}"
+        c = 0
+        if i < n_bytes:
+            c = sha256_digest[i] >> j
+        if i + 1 < n_bytes:
+            c |= sha256_digest[i + 1] << (8 - j)
+
+        result.append(NIX_BASE32_CHARS[c & 0x1f])
+
+    return f"sha256:{''.join(result)}"
 
 
 def verify_nar_hash(data: bytes, expected_hash: str) -> bool:
