@@ -1038,9 +1038,13 @@ async def iroh_nar_handler(request: Request) -> Response:
         if expected_nar_hash:
             if not verify_nar_hash(nar_data, expected_nar_hash):
                 computed_hash = compute_nar_hash(nar_data)
+                # Enhanced diagnostic logging for hash mismatches
                 logger.error(
                     f"NAR hash mismatch from peer {peer_id[:16]}! "
-                    f"Expected: {expected_nar_hash}, Got: {computed_hash}"
+                    f"Expected: {expected_nar_hash}, Got: {computed_hash}, "
+                    f"Size: {len(nar_data)} bytes, "
+                    f"First16: {nar_data[:16].hex() if len(nar_data) >= 16 else nar_data.hex()}, "
+                    f"Last16: {nar_data[-16:].hex() if len(nar_data) >= 16 else 'N/A'}"
                 )
                 _log_activity("download", hash_part, f"peer:{peer_id[:8]}", False, len(nar_data), name=drv_name)
                 return Response(

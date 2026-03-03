@@ -295,6 +295,19 @@ class NarProtocol(iroh.ProtocolHandler):
             nar_data = b''.join(chunks)
             nar_size = len(nar_data)
 
+            # Log hash for debugging (compute same way as verification)
+            import hashlib
+            sha256_digest = hashlib.sha256(nar_data).digest()
+            NIX_BASE32 = "0123456789abcdfghjklmnpqrstvwxyz"
+            bits = int.from_bytes(sha256_digest, 'big')
+            result = []
+            for _ in range(52):
+                result.append(NIX_BASE32[bits & 0x1f])
+                bits >>= 5
+            sender_hash = f"sha256:{''.join(reversed(result))[:52]}"
+            logger.info(f"NAR serving: {nar_size} bytes, hash={sender_hash}, "
+                       f"first16={nar_data[:16].hex()}, last16={nar_data[-16:].hex()}")
+
             # Send length header (8 bytes, big-endian)
             await send.write_all(nar_size.to_bytes(8, 'big'))
 
