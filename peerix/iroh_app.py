@@ -157,8 +157,15 @@ FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 # Default path for dashboard stats persistence
 DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
 
-# Version info
-PEERIX_VERSION = "0.0.4"
+# Version info - read from VERSION file
+def _read_version() -> str:
+    """Read version from VERSION file."""
+    version_file = Path(__file__).parent.parent / "VERSION"
+    if version_file.exists():
+        return version_file.read_text().strip()
+    return "0.0.4"  # Fallback
+
+PEERIX_VERSION = _read_version()
 # Git commit is passed via PEERIX_COMMIT env var at build time (from flake.nix)
 PEERIX_COMMIT = os.environ.get("PEERIX_COMMIT", "dev")
 
