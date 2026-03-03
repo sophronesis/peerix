@@ -44,6 +44,27 @@ class StoreConfig:
 
 
 @dataclass
+class TrustedCache:
+    """A trusted binary cache with its public key."""
+    url: str
+    public_key: str
+
+
+@dataclass
+class CachesConfig:
+    """Cache trust configuration for multi-cache support."""
+    # Default cache (always trusted)
+    default: str = "https://cache.nixos.org"
+    default_key: str = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    # Additional trusted caches
+    trusted_caches: List[TrustedCache] = field(default_factory=list)
+    # Auto-detect from /etc/nix/nix.conf
+    auto_detect: bool = True
+    # Enable multi-cache origin tracking
+    track_origins: bool = True
+
+
+@dataclass
 class SigningConfig:
     """NAR signing configuration."""
     private_key: Optional[str] = None
@@ -63,6 +84,7 @@ class PeerixConfig:
     store: StoreConfig = field(default_factory=StoreConfig)
     signing: SigningConfig = field(default_factory=SigningConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    caches: CachesConfig = field(default_factory=CachesConfig)
 
 
 DEFAULT_CONFIG_CONTENT = """\
@@ -96,6 +118,19 @@ upstream_cache = "https://cache.nixos.org"
 
 [security]
 allow_insecure_http = false  # Allow HTTP (non-TLS) - INSECURE
+
+[caches]
+# Multi-cache origin tracking
+# Peers can share packages from multiple trusted binary caches
+default = "https://cache.nixos.org"
+default_key = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+auto_detect = true     # Read substituters and keys from /etc/nix/nix.conf
+track_origins = true   # Track which cache each package came from
+
+# Additional trusted caches (example):
+# [[caches.trusted_caches]]
+# url = "https://my-cache.example.com"
+# public_key = "my-cache-1:abc123..."
 """
 
 
@@ -136,6 +171,17 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = False) ->
         store_data = data.get("store", {})
         signing_data = data.get("signing", {})
         security_data = data.get("security", {})
+        caches_data = data.get("caches", {})
+
+        # Parse trusted_caches list if present
+        trusted_caches_raw = caches_data.pop("trusted_caches", [])
+        trusted_caches = []
+        for cache in trusted_caches_raw:
+            if isinstance(cache, dict) and "url" in cache and "public_key" in cache:
+                trusted_caches.append(TrustedCache(
+                    url=cache["url"],
+                    public_key=cache["public_key"]
+                ))
 
         config = PeerixConfig(
             server=ServerConfig(**server_data),
@@ -143,6 +189,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = False) ->
             store=StoreConfig(**store_data),
             signing=SigningConfig(**signing_data),
             security=SecurityConfig(**security_data),
+            caches=CachesConfig(trusted_caches=trusted_caches, **caches_data),
         )
 
         logger.info(f"Loaded config from {config_path}")

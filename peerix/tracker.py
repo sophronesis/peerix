@@ -75,11 +75,41 @@ def init_db(db_path: str) -> sqlite3.Connection:
             hash TEXT NOT NULL,
             peer_id TEXT NOT NULL,
             last_seen REAL NOT NULL,
+            origin_cache TEXT,
+            public_key TEXT,
+            package_name TEXT,
             PRIMARY KEY (hash, peer_id)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_hash ON packages(hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_packages_peer ON packages(peer_id)")
+
+    # Migration: add new columns if they don't exist (for existing databases)
+    for col in ["origin_cache", "public_key", "package_name"]:
+        try:
+            conn.execute(f"ALTER TABLE packages ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+    # Peer cache trust registry: which caches each peer trusts
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS peer_caches (
+            peer_id TEXT NOT NULL,
+            cache_url TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            PRIMARY KEY (peer_id, cache_url)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_peer_caches_peer ON peer_caches(peer_id)")
+
+    # Allowed caches for tracker validation (Layer 2)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS allowed_caches (
+            cache_url TEXT PRIMARY KEY,
+            public_key TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1
+        )
+    """)
 
     # IPFS CID mappings: NarHash → IPFS CID
     conn.execute("""
@@ -313,15 +343,21 @@ def create_tracker_app(db_path: str) -> Starlette:
 
     @app.route("/find/{hash:str}", methods=["GET"])
     async def find_providers(req: Request) -> Response:
-        """Find peers that have a specific store path hash."""
+        """
+        Find peers that have a specific store path hash.
+
+        Returns providers with origin_cache and public_key metadata if available.
+        """
         store_hash = req.path_params["hash"]
         cutoff = time.time() - PEER_TTL
 
         # Find peers that have this package and are still active
+        # Include origin metadata from packages table
         rows = conn.execute("""
             SELECT p.peer_id, p.addr, p.port, p.libp2p_peer_id, p.last_seen,
                    COALESCE(r.total_shared, 0), COALESCE(r.successful_transfers, 0),
-                   COALESCE(r.failed_transfers, 0)
+                   COALESCE(r.failed_transfers, 0),
+                   pkg.origin_cache, pkg.public_key, pkg.package_name
             FROM packages pkg
             JOIN peers p ON pkg.peer_id = p.peer_id
             LEFT JOIN reputation r ON p.peer_id = r.peer_id
@@ -331,14 +367,22 @@ def create_tracker_app(db_path: str) -> Starlette:
         providers = []
         for row in rows:
             score = compute_score(row[5], row[6], row[7])
-            providers.append({
+            provider = {
                 "peer_id": row[0],
                 "addr": row[1],
                 "port": row[2],
                 "libp2p_peer_id": row[3],
                 "last_seen": row[4],
                 "score": round(score, 4),
-            })
+            }
+            # Include origin metadata if available
+            if row[8]:  # origin_cache
+                provider["origin_cache"] = row[8]
+            if row[9]:  # public_key
+                provider["public_key"] = row[9]
+            if row[10]:  # package_name
+                provider["name"] = row[10]
+            providers.append(provider)
 
         # Sort by reputation score
         providers.sort(key=lambda p: p["score"], reverse=True)
@@ -445,34 +489,85 @@ def create_tracker_app(db_path: str) -> Starlette:
 
     @app.route("/packages/batch", methods=["POST"])
     async def batch_register_packages(req: Request) -> Response:
-        """Register many package hashes at once for a peer."""
+        """
+        Register many package hashes at once for a peer.
+
+        Supports two formats:
+        - Legacy: {"peer_id": "...", "hashes": ["hash1", "hash2"]}
+        - New: {"peer_id": "...", "packages": [{"hash": "...", "name": "...", "origin": "...", "public_key": "..."}]}
+        """
         body = await req.json()
         peer_id = body.get("peer_id")
         hashes = body.get("hashes", [])
+        packages = body.get("packages", [])
 
         if not peer_id:
             return JSONResponse({"error": "peer_id required"}, status_code=400)
 
-        if not isinstance(hashes, list):
-            return JSONResponse({"error": "hashes must be a list"}, status_code=400)
-
         now = time.time()
 
-        # Clear old entries for this peer and insert new ones
+        # Clear old entries for this peer
         conn.execute("DELETE FROM packages WHERE peer_id = ?", (peer_id,))
-        if hashes:
+
+        if packages and isinstance(packages, list):
+            # New format with metadata
+            valid_packages = []
+            rejected_count = 0
+            for pkg in packages:
+                if not isinstance(pkg, dict) or "hash" not in pkg:
+                    continue
+                origin_cache = pkg.get("origin")
+                public_key = pkg.get("public_key")
+
+                # Layer 2 validation: check if origin cache is allowed
+                if origin_cache:
+                    allowed = _validate_cache(conn, origin_cache, public_key)
+                    if not allowed:
+                        rejected_count += 1
+                        continue
+
+                valid_packages.append((
+                    pkg["hash"],
+                    peer_id,
+                    now,
+                    origin_cache,
+                    public_key,
+                    pkg.get("name"),
+                ))
+
+            if valid_packages:
+                conn.executemany(
+                    "INSERT INTO packages (hash, peer_id, last_seen, origin_cache, public_key, package_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    valid_packages
+                )
+            conn.commit()
+            logger.info(f"Batch register: peer {peer_id} registered {len(valid_packages)} packages (rejected {rejected_count})")
+            return JSONResponse({"status": "ok", "count": len(valid_packages), "rejected": rejected_count})
+
+        elif hashes and isinstance(hashes, list):
+            # Legacy format (backwards compatible)
             conn.executemany(
                 "INSERT INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
                 [(h, peer_id, now) for h in hashes]
             )
-        conn.commit()
+            conn.commit()
+            logger.info(f"Batch register: peer {peer_id} registered {len(hashes)} packages (legacy)")
+            return JSONResponse({"status": "ok", "count": len(hashes)})
 
-        logger.info(f"Batch register: peer {peer_id} registered {len(hashes)} packages")
-        return JSONResponse({"status": "ok", "count": len(hashes)})
+        return JSONResponse({"status": "ok", "count": 0})
 
     @app.route("/packages/delta", methods=["POST"])
     async def delta_sync_packages(req: Request) -> Response:
-        """Sync only added/removed package hashes for a peer."""
+        """
+        Sync only added/removed package hashes for a peer.
+
+        Supports two formats for 'added':
+        - Legacy: ["hash1", "hash2"]
+        - New: [{"hash": "...", "name": "...", "origin": "...", "public_key": "..."}]
+
+        'removed' is always a list of hash strings.
+        """
         body = await req.json()
         peer_id = body.get("peer_id")
         added = body.get("added", [])
@@ -485,37 +580,89 @@ def create_tracker_app(db_path: str) -> Starlette:
             return JSONResponse({"error": "added and removed must be lists"}, status_code=400)
 
         now = time.time()
+        rejected_count = 0
 
         # Remove the specified hashes
         if removed:
-            placeholders = ",".join("?" * len(removed))
-            conn.execute(
-                f"DELETE FROM packages WHERE peer_id = ? AND hash IN ({placeholders})",
-                [peer_id] + removed
-            )
+            # Handle both string hashes and dicts with "hash" key
+            removed_hashes = []
+            for r in removed:
+                if isinstance(r, str):
+                    removed_hashes.append(r)
+                elif isinstance(r, dict) and "hash" in r:
+                    removed_hashes.append(r["hash"])
+            if removed_hashes:
+                placeholders = ",".join("?" * len(removed_hashes))
+                conn.execute(
+                    f"DELETE FROM packages WHERE peer_id = ? AND hash IN ({placeholders})",
+                    [peer_id] + removed_hashes
+                )
 
         # Add the new hashes
+        added_count = 0
         if added:
-            conn.executemany(
-                "INSERT OR REPLACE INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
-                [(h, peer_id, now) for h in added]
-            )
+            # Check if new format (list of dicts) or legacy (list of strings)
+            if added and isinstance(added[0], dict):
+                # New format with metadata
+                valid_packages = []
+                for pkg in added:
+                    if not isinstance(pkg, dict) or "hash" not in pkg:
+                        continue
+                    origin_cache = pkg.get("origin")
+                    public_key = pkg.get("public_key")
+
+                    # Layer 2 validation: check if origin cache is allowed
+                    if origin_cache:
+                        allowed = _validate_cache(conn, origin_cache, public_key)
+                        if not allowed:
+                            rejected_count += 1
+                            continue
+
+                    valid_packages.append((
+                        pkg["hash"],
+                        peer_id,
+                        now,
+                        origin_cache,
+                        public_key,
+                        pkg.get("name"),
+                    ))
+
+                if valid_packages:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO packages (hash, peer_id, last_seen, origin_cache, public_key, package_name) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        valid_packages
+                    )
+                added_count = len(valid_packages)
+            else:
+                # Legacy format (list of strings)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO packages (hash, peer_id, last_seen) VALUES (?, ?, ?)",
+                    [(h, peer_id, now) for h in added if isinstance(h, str)]
+                )
+                added_count = len([h for h in added if isinstance(h, str)])
 
         conn.commit()
 
-        logger.info(f"Delta sync: peer {peer_id} added {len(added)}, removed {len(removed)}")
-        return JSONResponse({"status": "ok", "added": len(added), "removed": len(removed)})
+        removed_count = len(removed)
+        logger.info(f"Delta sync: peer {peer_id} added {added_count}, removed {removed_count}, rejected {rejected_count}")
+        return JSONResponse({"status": "ok", "added": added_count, "removed": removed_count, "rejected": rejected_count})
 
     # ========== Iroh P2P endpoints ==========
 
     @app.route("/iroh/announce", methods=["POST"])
     async def iroh_announce(req: Request) -> Response:
-        """Announce an Iroh peer with its node ID and addresses."""
+        """
+        Announce an Iroh peer with its node ID and addresses.
+
+        Optionally includes trusted_caches list for Layer 3 validation.
+        """
         body = await req.json()
         node_id = body.get("node_id")
         peer_id = body.get("peer_id")
         relay_url = body.get("relay_url")
         direct_addrs = body.get("direct_addrs", [])
+        trusted_caches = body.get("trusted_caches", [])
 
         if not node_id or not peer_id:
             return JSONResponse({"error": "node_id and peer_id required"}, status_code=400)
@@ -533,9 +680,22 @@ def create_tracker_app(db_path: str) -> Starlette:
             "ON CONFLICT(node_id) DO UPDATE SET peer_id=?, relay_url=?, direct_addrs=?, addr=?, last_seen=?",
             (node_id, peer_id, relay_url, addrs_json, addr, now, peer_id, relay_url, addrs_json, addr, now)
         )
+
+        # Update peer's trusted caches if provided
+        if trusted_caches:
+            # Clear old entries and insert new ones
+            conn.execute("DELETE FROM peer_caches WHERE peer_id = ?", (node_id,))
+            for cache in trusted_caches:
+                if isinstance(cache, dict) and "url" in cache and "public_key" in cache:
+                    conn.execute(
+                        "INSERT INTO peer_caches (peer_id, cache_url, public_key) VALUES (?, ?, ?)",
+                        (node_id, cache["url"], cache["public_key"])
+                    )
+
         conn.commit()
 
-        logger.info(f"Iroh peer announced: {node_id[:16]}... (peer={peer_id}, addr={addr}, relay={relay_url})")
+        cache_count = len(trusted_caches) if trusted_caches else 0
+        logger.info(f"Iroh peer announced: {node_id[:16]}... (peer={peer_id}, addr={addr}, relay={relay_url}, caches={cache_count})")
         return JSONResponse({"status": "ok"})
 
     @app.route("/iroh/peers", methods=["GET"])
@@ -592,6 +752,18 @@ def create_tracker_app(db_path: str) -> Starlette:
             "last_seen": row[4],
         })
 
+    @app.route("/iroh/peer/{node_id:str}/caches", methods=["GET"])
+    async def iroh_get_peer_caches(req: Request) -> Response:
+        """Get a peer's trusted caches (for Layer 3 validation)."""
+        node_id = req.path_params["node_id"]
+        rows = conn.execute(
+            "SELECT cache_url, public_key FROM peer_caches WHERE peer_id = ?",
+            (node_id,)
+        ).fetchall()
+
+        caches = [{"url": row[0], "public_key": row[1]} for row in rows]
+        return JSONResponse({"peer_id": node_id, "trusted_caches": caches})
+
     @app.route("/iroh/peer/{node_id:str}", methods=["DELETE"])
     async def iroh_delete_peer(req: Request) -> Response:
         """
@@ -622,7 +794,89 @@ def create_tracker_app(db_path: str) -> Starlette:
         logger.info(f"Iroh peer deregistered: {node_id[:16]}...")
         return JSONResponse({"status": "deregistered"})
 
+    # ========== Admin endpoints for allowed caches ==========
+
+    @app.route("/admin/caches", methods=["GET"])
+    async def list_allowed_caches(req: Request) -> Response:
+        """List all allowed caches."""
+        rows = conn.execute(
+            "SELECT cache_url, public_key, enabled FROM allowed_caches"
+        ).fetchall()
+        caches = [
+            {"url": row[0], "public_key": row[1], "enabled": bool(row[2])}
+            for row in rows
+        ]
+        return JSONResponse({"caches": caches, "count": len(caches)})
+
+    @app.route("/admin/caches", methods=["POST"])
+    async def add_allowed_cache(req: Request) -> Response:
+        """Add an allowed cache."""
+        body = await req.json()
+        cache_url = body.get("url")
+        public_key = body.get("public_key")
+
+        if not cache_url or not public_key:
+            return JSONResponse({"error": "url and public_key required"}, status_code=400)
+
+        conn.execute(
+            "INSERT INTO allowed_caches (cache_url, public_key, enabled) VALUES (?, ?, 1) "
+            "ON CONFLICT(cache_url) DO UPDATE SET public_key=?, enabled=1",
+            (cache_url, public_key, public_key)
+        )
+        conn.commit()
+
+        logger.info(f"Added allowed cache: {cache_url}")
+        return JSONResponse({"status": "ok"})
+
+    @app.route("/admin/caches/{cache_url:path}", methods=["DELETE"])
+    async def remove_allowed_cache(req: Request) -> Response:
+        """Remove an allowed cache."""
+        cache_url = req.path_params["cache_url"]
+        cursor = conn.execute("DELETE FROM allowed_caches WHERE cache_url = ?", (cache_url,))
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return JSONResponse({"status": "not found"}, status_code=404)
+
+        logger.info(f"Removed allowed cache: {cache_url}")
+        return JSONResponse({"status": "ok"})
+
     return app
+
+
+def _validate_cache(conn: sqlite3.Connection, origin_cache: str, public_key: str = None) -> bool:
+    """
+    Validate that an origin cache is allowed by the tracker (Layer 2 validation).
+
+    If no allowed_caches are configured, all caches are allowed (permissive mode).
+    If allowed_caches exist, only those caches are accepted.
+    If public_key is provided, it must match the configured key for that cache.
+
+    Returns:
+        True if cache is allowed, False otherwise
+    """
+    # Check if there are any allowed caches configured
+    row = conn.execute("SELECT COUNT(*) FROM allowed_caches WHERE enabled = 1").fetchone()
+    if row[0] == 0:
+        # No allowed caches configured - permissive mode
+        return True
+
+    # Check if this specific cache is allowed
+    if public_key:
+        row = conn.execute(
+            "SELECT public_key FROM allowed_caches WHERE cache_url = ? AND enabled = 1",
+            (origin_cache,)
+        ).fetchone()
+        if row is None:
+            return False
+        # Validate public key matches
+        return row[0] == public_key
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM allowed_caches WHERE cache_url = ? AND enabled = 1",
+            (origin_cache,)
+        ).fetchone()
+        return row is not None
 
 
 def _update_reputation(conn: sqlite3.Connection, peer_id: str,

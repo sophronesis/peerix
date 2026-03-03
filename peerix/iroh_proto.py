@@ -391,7 +391,8 @@ class IrohNode:
     def __init__(self, local_store, tracker_url: str = None, peer_id: str = None,
                  connect_timeout: float = 10.0, state_dir: t.Optional[Path] = None,
                  on_served: t.Optional[t.Callable[[str, str, str], None]] = None,
-                 on_nar_served: t.Optional[t.Callable[[str, str, int, str], None]] = None):
+                 on_nar_served: t.Optional[t.Callable[[str, str, int, str], None]] = None,
+                 trusted_caches: t.Optional[t.List[t.Dict[str, str]]] = None):
         self.local_store = local_store
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
         self.peer_id = peer_id or "iroh-node"  # Human-readable peer ID
@@ -415,6 +416,8 @@ class IrohNode:
         # Tracking callbacks
         self._on_served = on_served  # Called when narinfo served: (hash, name)
         self._on_nar_served = on_nar_served  # Called when NAR served: (hash, name, size)
+        # Multi-cache support: trusted caches to advertise to tracker
+        self._trusted_caches = trusted_caches or []
 
     async def start(self):
         """Start the Iroh node with persistent identity."""
@@ -863,7 +866,11 @@ class IrohNode:
     # ========== Tracker Integration ==========
 
     async def announce_to_tracker(self) -> bool:
-        """Announce our Iroh node to the tracker."""
+        """
+        Announce our Iroh node to the tracker.
+
+        Includes trusted_caches for multi-cache support (Layer 3 validation).
+        """
         if not self.tracker_url or not self._http_client:
             return False
 
@@ -883,6 +890,10 @@ class IrohNode:
                 "direct_addrs": direct_addrs,
             }
 
+            # Include trusted caches for multi-cache support
+            if self._trusted_caches:
+                payload["trusted_caches"] = self._trusted_caches
+
             resp = await self._http_client.post(
                 f"{self.tracker_url}/iroh/announce",
                 json=payload,
@@ -899,6 +910,10 @@ class IrohNode:
         except Exception as e:
             logger.warning(f"Tracker announce error: {e}")
             return False
+
+    def set_trusted_caches(self, caches: t.List[t.Dict[str, str]]) -> None:
+        """Update the list of trusted caches to advertise."""
+        self._trusted_caches = caches
 
     async def deregister_from_tracker(self) -> bool:
         """

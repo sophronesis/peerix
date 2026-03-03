@@ -160,6 +160,9 @@ from .store_scanner import scan_store_paths
 from .filtered import FilteredStore, NixpkgsFilteredStore
 from .verified import VerifiedStore
 from .lan_discovery import LANDiscovery
+from .cache_registry import CacheRegistry, init_cache_registry, get_cache_registry
+from .origin_detector import OriginDetector, OriginInfo, init_origin_detector, get_origin_detector
+from .config import CachesConfig
 
 # Default path for persisting announced state
 DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
@@ -167,6 +170,8 @@ DEFAULT_STATE_FILE = "/var/lib/peerix/announced_state.json"
 FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 # Default path for dashboard stats persistence
 DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
+# Default path for origin cache (multi-cache support)
+DEFAULT_ORIGIN_CACHE_FILE = "/var/lib/peerix/origin_cache.json"
 
 # Version info - read from VERSION file
 def _read_version() -> str:
@@ -406,6 +411,9 @@ class StoreManager:
         filter_cache_file: str = FILTER_CACHE_FILE,
         nixpkgs_filter: t.Optional["NixpkgsFilteredStore"] = None,
         filter_concurrency: int = 10,
+        cache_registry: t.Optional[CacheRegistry] = None,
+        origin_detector: t.Optional[OriginDetector] = None,
+        track_origins: bool = True,
     ):
         self.scan_interval = scan_interval
         self.tracker_url = tracker_url.rstrip("/") if tracker_url else None
@@ -435,6 +443,15 @@ class StoreManager:
         self._running = False
         self._http_client: t.Optional[httpx.AsyncClient] = None
 
+        # Multi-cache support
+        self._cache_registry = cache_registry or get_cache_registry()
+        self._origin_detector = origin_detector or get_origin_detector()
+        self._track_origins = track_origins
+        # Cache of hash -> OriginInfo for packages with detected origins
+        self._package_origins: t.Dict[str, OriginInfo] = {}
+        # Track which hashes have been announced with origins (for delta sync)
+        self._last_announced_origins: t.Dict[str, t.Dict[str, str]] = {}
+
         # Load previously announced state and filter cache
         self._load_announced_state()
         self._load_filter_cache()
@@ -446,17 +463,23 @@ class StoreManager:
                 with open(self._state_file, "r") as f:
                     data = json.load(f)
                     self._last_announced_hashes = set(data.get("hashes", []))
+                    # Load origin metadata if present (new format)
+                    self._last_announced_origins = data.get("origins", {})
                     logger.info(f"Loaded {len(self._last_announced_hashes)} announced hashes from state")
         except Exception as e:
             logger.warning(f"Failed to load announced state: {e}")
             self._last_announced_hashes = set()
+            self._last_announced_origins = {}
 
     def _save_announced_state(self) -> None:
         """Save the set of announced hashes to disk."""
         try:
             os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
             with open(self._state_file, "w") as f:
-                json.dump({"hashes": list(self._last_announced_hashes)}, f)
+                json.dump({
+                    "hashes": list(self._last_announced_hashes),
+                    "origins": self._last_announced_origins,
+                }, f)
         except Exception as e:
             logger.warning(f"Failed to save announced state: {e}")
 
@@ -533,6 +556,9 @@ class StoreManager:
         Only sends added/removed hashes since last sync. Falls back to
         batch register if this is the first sync.
 
+        If multi-cache origin tracking is enabled, sends origin metadata
+        with each package.
+
         Returns:
             True if successful
         """
@@ -557,17 +583,40 @@ class StoreManager:
 
         client = await self._get_http_client()
         try:
-            resp = await client.post(
-                f"{self.tracker_url}/packages/delta",
-                json={
+            # Build payload - use new format with origins if tracking enabled
+            if self._track_origins and self._origin_detector:
+                added_with_origins = self._build_packages_with_origins(list(added))
+                payload = {
+                    "peer_id": self.peer_id,
+                    "added": added_with_origins,
+                    "removed": list(removed),
+                }
+            else:
+                # Legacy format
+                payload = {
                     "peer_id": self.peer_id,
                     "added": list(added),
                     "removed": list(removed),
-                },
+                }
+
+            resp = await client.post(
+                f"{self.tracker_url}/packages/delta",
+                json=payload,
                 timeout=60.0,
             )
             if resp.status_code == 200:
                 self._last_announced_hashes = current_hashes.copy()
+                # Update announced origins
+                for h in added:
+                    if h in self._package_origins:
+                        origin = self._package_origins[h]
+                        self._last_announced_origins[h] = {
+                            "origin": origin.cache_url,
+                            "public_key": origin.public_key,
+                            "name": origin.package_name,
+                        }
+                for h in removed:
+                    self._last_announced_origins.pop(h, None)
                 self._save_announced_state()
                 logger.info(f"Delta sync: +{len(added)} -{len(removed)} packages")
                 return True
@@ -578,20 +627,64 @@ class StoreManager:
             logger.warning(f"Delta sync error: {e}")
             return False
 
+    def _build_packages_with_origins(self, hashes: t.List[str]) -> t.List[t.Dict[str, str]]:
+        """
+        Build package list with origin metadata for tracker sync.
+
+        Args:
+            hashes: List of store path hashes
+
+        Returns:
+            List of package dicts with origin info
+        """
+        packages = []
+        for h in hashes:
+            pkg: t.Dict[str, str] = {"hash": h}
+            if h in self._package_origins:
+                origin = self._package_origins[h]
+                pkg["origin"] = origin.cache_url
+                pkg["public_key"] = origin.public_key
+                if origin.package_name:
+                    pkg["name"] = origin.package_name
+            packages.append(pkg)
+        return packages
+
     async def _batch_register_packages(self, hashes: t.List[str]) -> bool:
-        """Register many package hashes at once with the tracker."""
+        """
+        Register many package hashes at once with the tracker.
+
+        If multi-cache origin tracking is enabled, sends origin metadata
+        with each package using the new format.
+        """
         if not self.tracker_url or not self.peer_id:
             return True
 
         client = await self._get_http_client()
         try:
+            # Build payload - use new format with origins if tracking enabled
+            if self._track_origins and self._origin_detector:
+                packages = self._build_packages_with_origins(hashes)
+                payload = {"peer_id": self.peer_id, "packages": packages}
+            else:
+                # Legacy format
+                payload = {"peer_id": self.peer_id, "hashes": hashes}
+
             resp = await client.post(
                 f"{self.tracker_url}/packages/batch",
-                json={"peer_id": self.peer_id, "hashes": hashes},
+                json=payload,
                 timeout=60.0,
             )
             if resp.status_code == 200:
                 self._last_announced_hashes = set(hashes)
+                # Update announced origins
+                for h in hashes:
+                    if h in self._package_origins:
+                        origin = self._package_origins[h]
+                        self._last_announced_origins[h] = {
+                            "origin": origin.cache_url,
+                            "public_key": origin.public_key,
+                            "name": origin.package_name,
+                        }
                 self._save_announced_state()
                 logger.info(f"Batch registered {len(hashes)} packages with tracker")
                 return True
@@ -731,6 +824,9 @@ class StoreManager:
         """
         Perform a single store scan.
 
+        If multi-cache origin tracking is enabled, also detects
+        which cache each package came from.
+
         Returns:
             Number of hashes found (after filtering)
         """
@@ -766,12 +862,59 @@ class StoreManager:
             else:
                 self._available_hashes = set(all_hashes)
 
+            # Detect package origins if tracking enabled
+            if self._track_origins and self._origin_detector:
+                await self._detect_origins()
+
             self._scan_progress["last_scan"] = time.time()
             logger.info(f"Store scan complete: {len(self._available_hashes)} paths available")
             return len(self._available_hashes)
 
         finally:
             self._scan_progress["active"] = False
+
+    async def _detect_origins(self) -> None:
+        """
+        Detect origins for available hashes.
+
+        Uses the origin detector to determine which cache each package came from.
+        Only processes hashes that don't already have origin info cached.
+        """
+        if not self._origin_detector:
+            return
+
+        # Find hashes that need origin detection
+        hashes_to_check = [
+            h for h in self._available_hashes
+            if h not in self._package_origins
+        ]
+
+        if not hashes_to_check:
+            logger.debug("All package origins already cached")
+            return
+
+        logger.info(f"Detecting origins for {len(hashes_to_check)} packages...")
+
+        # Use batch detection for efficiency
+        # Run in executor to avoid blocking asyncio
+        loop = asyncio.get_event_loop()
+        detected = await loop.run_in_executor(
+            None,
+            self._origin_detector.detect_origin_batch,
+            hashes_to_check
+        )
+
+        # Store detected origins
+        self._package_origins.update(detected)
+
+        # Save origin cache
+        self._origin_detector.save_cache()
+
+        trusted_count = len(detected)
+        logger.info(
+            f"Origin detection complete: {trusted_count}/{len(hashes_to_check)} "
+            f"packages have known origins"
+        )
 
     async def run_periodic_scan(self):
         """Run periodic store scanning in background."""
@@ -1949,6 +2092,7 @@ async def run_server(
     upstream_cache: str = "https://cache.nixos.org",
     filter_concurrency: int = 10,
     lan_discovery: bool = False,
+    caches_config: t.Optional[CachesConfig] = None,
 ):
     """
     Run the Iroh-based peerix server.
@@ -1969,11 +2113,20 @@ async def run_server(
         upstream_cache: Upstream cache URL for verification
         filter_concurrency: Max concurrent requests when filtering (default: 10)
         lan_discovery: Enable LAN peer discovery via UDP broadcast
+        caches_config: Multi-cache configuration (optional)
     """
     global _iroh_node, _local_store, _cache_priority, _store_manager, _lan_discovery
     _cache_priority = priority
     _nixpkgs_filter = None  # Track for cleanup
     _verified_store = None  # Track for cleanup
+    _cache_registry = None  # Track for multi-cache support
+    _origin_detector = None  # Track for origin detection
+
+    # Initialize multi-cache support if configured
+    if caches_config and caches_config.track_origins:
+        _cache_registry = init_cache_registry(caches_config)
+        _origin_detector = init_origin_detector(_cache_registry)
+        logger.info(f"Multi-cache support enabled with {len(_cache_registry._caches)} caches")
 
     # Initialize signing if key provided
     if private_key:
@@ -2040,6 +2193,11 @@ async def run_server(
             _record_metric("bytes_sent_total", size)
             _record_peer_bandwidth(peer_id, bytes_sent=size)
 
+        # Get trusted caches payload for tracker announcement
+        trusted_caches_payload = None
+        if _cache_registry:
+            trusted_caches_payload = _cache_registry.get_trusted_caches_payload()
+
         # Start Iroh node (use serving_store which has filtering/verification applied)
         _iroh_node = IrohNode(
             serving_store,
@@ -2049,6 +2207,7 @@ async def run_server(
             state_dir=state_dir,
             on_served=on_iroh_served,
             on_nar_served=on_iroh_nar_served,
+            trusted_caches=trusted_caches_payload,
         )
 
         try:
@@ -2062,14 +2221,18 @@ async def run_server(
 
             # Initialize store manager for tracking available packages (non-blocking)
             if scan_interval > 0:
+                track_origins = caches_config.track_origins if caches_config else False
                 _store_manager = StoreManager(
                     scan_interval=scan_interval,
                     tracker_url=tracker_url,
                     peer_id=peer_id,
                     nixpkgs_filter=_nixpkgs_filter,
                     filter_concurrency=filter_concurrency,
+                    cache_registry=_cache_registry,
+                    origin_detector=_origin_detector,
+                    track_origins=track_origins,
                 )
-                logger.info(f"Store manager initialized (scan runs in background, concurrency={filter_concurrency})")
+                logger.info(f"Store manager initialized (scan runs in background, concurrency={filter_concurrency}, track_origins={track_origins})")
 
             # Initialize LAN discovery if enabled
             if lan_discovery:
@@ -2276,6 +2439,7 @@ def main():
             upstream_cache=args.upstream_cache,
             filter_concurrency=args.filter_concurrency,
             lan_discovery=args.lan_discovery,
+            caches_config=config.caches,
         ))
     except KeyboardInterrupt:
         logger.info("Interrupted")
