@@ -327,10 +327,10 @@ in
 
       nix = {
         settings = {
-          substituters = [
+          extra-substituters = [
             "http://127.0.0.1:12304/"
           ];
-          trusted-public-keys = [
+          extra-trusted-public-keys = [
             (lib.mkIf (cfg.publicKeyFile != null) (builtins.readFile cfg.publicKeyFile))
             (lib.mkIf (cfg.publicKey != null) cfg.publicKey)
           ];
