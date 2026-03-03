@@ -168,13 +168,18 @@ FILTER_CACHE_FILE = "/var/lib/peerix/filter_cache.json"
 # Default path for dashboard stats persistence
 DEFAULT_STATS_FILE = "/var/lib/peerix/stats.json"
 
-# Version info - read from VERSION file
+# Version info - read from package metadata
 def _read_version() -> str:
-    """Read version from VERSION file."""
-    version_file = Path(__file__).parent.parent / "VERSION"
-    if version_file.exists():
-        return version_file.read_text().strip()
-    return "0.0.4"  # Fallback
+    """Read version from installed package metadata."""
+    try:
+        from importlib.metadata import version
+        return version("peerix")
+    except Exception:
+        # Fallback: try VERSION file (for dev mode)
+        version_file = Path(__file__).parent.parent / "VERSION"
+        if version_file.exists():
+            return version_file.read_text().strip()
+        return "0.0.4"  # Ultimate fallback
 
 PEERIX_VERSION = _read_version()
 # Git commit is passed via PEERIX_COMMIT env var at build time (from flake.nix)
