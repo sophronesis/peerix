@@ -22,7 +22,7 @@ Add `peerix.nixosModules.peerix` to your modules, then in `configuration.nix`:
 ```nix
 services.peerix = {
   enable = true;
-  # trackerUrl = "http://your-tracker:12305";  # defaults to sophronesis.dev/peerix
+  # trackerUrl defaults to "https://sophronesis.dev/peerix"
 };
 ```
 
@@ -74,7 +74,7 @@ Configuration
 | `enable` | `false` | Enable peerix |
 | `mode` | `"iroh"` | Discovery mode: `"iroh"` or `"lan"` |
 | `port` | `12304` | HTTP server port |
-| `trackerUrl` | `null` | Tracker URL for peer discovery |
+| `trackerUrl` | `"https://sophronesis.dev/peerix"` | Tracker URL for peer discovery |
 | `openFirewall` | `true` | Open firewall ports |
 | `privateKeyFile` | `null` | Path to signing key |
 | `publicKey` | `null` | Public key for signature verification |
@@ -129,7 +129,7 @@ Configuration Options
 | `services.peerix.privateKeyFile` | Path to the private key file for signing | `null` |
 | `services.peerix.publicKeyFile` | Path to the public key file for verification | `null` |
 | `services.peerix.publicKey` | Public key string for verification | `null` |
-| `services.peerix.trackerUrl` | URL of the peerix tracker server | `null` |
+| `services.peerix.trackerUrl` | URL of the peerix tracker server | `"https://sophronesis.dev/peerix"` |
 | `services.peerix.upstreamCache` | Upstream cache URL for hash verification | `"https://cache.nixos.org"` |
 | `services.peerix.noVerify` | Disable hash verification against upstream | `false` |
 | `services.peerix.noFilter` | Disable filtering (serve all packages) | `false` |
