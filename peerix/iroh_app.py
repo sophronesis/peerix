@@ -1330,12 +1330,24 @@ async def peers_handler(request: Request) -> Response:
         # Use public IP for geo lookup (more accurate)
         geo_ip = public_ip or direct_ip
 
+        # Get reputation data for this peer
+        rep = _iroh_node._get_peer_reputation(node_id)
         peer_info = {
             "node_id": node_id,
             "node_id_short": node_id[:16] + "...",
             "public_ip": public_ip,      # Real IP from tracker
             "direct_ip": direct_ip,       # Direct connection IP (may be VPN/Tailscale)
             "country": _ip_country_cache.get(geo_ip, "") if geo_ip else "",
+            "reputation": {
+                "score": round(rep.score(), 2),
+                "success_rate": round(rep.success_rate * 100, 1),
+                "total_requests": rep.total_requests,
+                "successful": rep.successful_requests,
+                "failed": rep.failed_requests,
+                "avg_latency_ms": round(rep.avg_latency_ms, 1),
+                "bytes_transferred": rep.total_bytes_transferred,
+                "backed_off": rep.is_backed_off(),
+            },
         }
         peers.append(peer_info)
 
@@ -1684,7 +1696,12 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         function formatTime(ts) {
             if (!ts) return '--';
             const date = new Date(ts * 1000);
-            return date.toLocaleTimeString();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const mins = String(date.getMinutes()).padStart(2, '0');
+            const secs = String(date.getSeconds()).padStart(2, '0');
+            return `${month}/${day} ${hours}:${mins}:${secs}`;
         }
 
         // Country code to flag emoji
@@ -1753,7 +1770,15 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     } else if (peer.direct_ip) {
                         ipInfo = `<span style="color:#888">${peer.direct_ip}</span>`;
                     }
-                    div.innerHTML = `<span style="margin-right: 6px;">${flag}</span>${peer.node_id_short} ${ipInfo}`;
+                    // Reputation display
+                    let repInfo = '';
+                    if (peer.reputation) {
+                        const rep = peer.reputation;
+                        const scoreColor = rep.score >= 0.7 ? '#00ff88' : (rep.score >= 0.4 ? '#ffaa00' : '#ff4444');
+                        const backedOff = rep.backed_off ? ' <span style="color:#ff4444">⏸</span>' : '';
+                        repInfo = ` <span style="color:${scoreColor}" title="Score: ${rep.score}, Success: ${rep.success_rate}%, Reqs: ${rep.total_requests}, Latency: ${rep.avg_latency_ms}ms">★${rep.score}</span>${backedOff}`;
+                    }
+                    div.innerHTML = `<span style="margin-right: 6px;">${flag}</span>${peer.node_id_short} ${ipInfo}${repInfo}`;
                     div.title = peer.node_id;
                     peersList.appendChild(div);
                 }
@@ -1834,7 +1859,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                 for (const item of (stats.activity || [])) {
                     const div = document.createElement('div');
                     div.className = 'peer-item';
-                    const timeStr = new Date(item.time * 1000).toLocaleTimeString();
+                    const timeStr = formatTime(item.time);
                     const icon = item.action === 'check' ? '🔍' : (item.action === 'served' ? '📤' : '📦');
                     const color = item.success ? '#00ff88' : '#ff4444';
                     const sizeStr = item.size > 0 ? ` (${(item.size/1024).toFixed(1)}KB)` : '';
