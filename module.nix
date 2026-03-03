@@ -85,11 +85,12 @@ in
 
       trackerUrl = lib.mkOption {
         type = types.nullOr types.str;
-        default = null;
+        default = "https://sophronesis.dev/peerix";
         description = ''
           URL of the peerix tracker server for peer discovery.
           If set: Uses Iroh mode (P2P with NAT traversal via tracker).
           If null: Uses LAN mode (UDP broadcast, local network only).
+          Default: "https://sophronesis.dev/peerix" (Iroh mode).
         '';
       };
 

@@ -7,10 +7,6 @@ Basically like torrent tracker, but for your `/nix/store/`
 Quick Start
 -----------
 
-### Iroh Mode (default)
-
-Uses Iroh for NAT-traversing P2P connectivity with automatic relay fallback.
-
 Add to `flake.nix` inputs:
 
 ```nix
@@ -19,23 +15,30 @@ inputs.peerix.url = "github:sophronesis/peerix";
 
 Add `peerix.nixosModules.peerix` to your modules, then in `configuration.nix`:
 
+### Iroh Mode (default)
+
+Uses Iroh for NAT-traversing P2P connectivity with automatic relay fallback:
+
 ```nix
-services.peerix = {
-  enable = true;
-  # trackerUrl defaults to "https://sophronesis.dev/peerix"
-};
+services.peerix.enable = true;
+# trackerUrl defaults to "https://sophronesis.dev/peerix"
 ```
 
 ### LAN Mode
 
-Zero-config peer discovery on local networks (no internet required):
+Zero-config peer discovery on local networks (no internet required).
+Set `trackerUrl = null` to use LAN mode:
 
 ```nix
 services.peerix = {
   enable = true;
-  mode = "lan";
+  trackerUrl = null;  # Use LAN mode instead of Iroh
 };
 ```
+
+**Mode is auto-selected based on `trackerUrl`:**
+- `trackerUrl` set (default) → **Iroh mode** (P2P with NAT traversal via tracker)
+- `trackerUrl = null` → **LAN mode** (UDP broadcast, local network only)
 
 ### Run Your Own Tracker
 
@@ -72,12 +75,13 @@ Configuration
 | Option | Default | Description |
 |--------|---------|-------------|
 | `enable` | `false` | Enable peerix |
-| `mode` | `"iroh"` | Discovery mode: `"iroh"` or `"lan"` |
-| `port` | `12304` | HTTP server port |
-| `trackerUrl` | `"https://sophronesis.dev/peerix"` | Tracker URL for peer discovery |
+| `trackerUrl` | `"https://sophronesis.dev/peerix"` | Tracker URL (null=LAN mode, set=Iroh mode) |
 | `openFirewall` | `true` | Open firewall ports |
 | `privateKeyFile` | `null` | Path to signing key |
 | `publicKey` | `null` | Public key for signature verification |
+| `priority` | `5` | Cache priority (lower = higher priority) |
+| `timeout` | `10.0` | Connection timeout in seconds |
+| `scanInterval` | `3600` | Seconds between store scans (0 to disable) |
 
 ### Tracker Options
 
@@ -121,20 +125,22 @@ Configuration Options
 | Option | Description | Default |
 |--------|-------------|---------|
 | `services.peerix.enable` | Enables Peerix | `false` |
+| `services.peerix.trackerUrl` | Tracker URL (null=LAN mode, set=Iroh mode) | `"https://sophronesis.dev/peerix"` |
 | `services.peerix.openFirewall` | Open the necessary firewall ports | `true` |
-| `services.peerix.port` | Port for the HTTP server | `12304` |
-| `services.peerix.mode` | Discovery mode: `"iroh"` or `"lan"` | `"iroh"` |
 | `services.peerix.user` | User to run the peerix service under | `"nobody"` |
 | `services.peerix.group` | Group to run the peerix service under | `"nobody"` |
 | `services.peerix.privateKeyFile` | Path to the private key file for signing | `null` |
 | `services.peerix.publicKeyFile` | Path to the public key file for verification | `null` |
 | `services.peerix.publicKey` | Public key string for verification | `null` |
-| `services.peerix.trackerUrl` | URL of the peerix tracker server | `"https://sophronesis.dev/peerix"` |
 | `services.peerix.upstreamCache` | Upstream cache URL for hash verification | `"https://cache.nixos.org"` |
-| `services.peerix.noVerify` | Disable hash verification against upstream | `false` |
-| `services.peerix.noFilter` | Disable filtering (serve all packages) | `false` |
+| `services.peerix.priority` | Cache priority (lower = higher priority) | `5` |
+| `services.peerix.timeout` | Connection timeout in seconds | `10.0` |
 | `services.peerix.scanInterval` | Seconds between store scans (0 to disable) | `3600` |
+| `services.peerix.filterMode` | Filter mode: `"nixpkgs"` or `"rules"` | `"nixpkgs"` |
 | `services.peerix.filterConcurrency` | Max concurrent filter requests | `10` |
+| `services.peerix.noFilter` | Disable filtering (serve all packages) | `false` |
+| `services.peerix.noVerify` | Disable hash verification against upstream | `false` |
+| `services.peerix.allowInsecureHttp` | Allow HTTP (non-TLS) connections | `false` |
 
 ### Tracker Service
 
