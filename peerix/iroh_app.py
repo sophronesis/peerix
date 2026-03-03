@@ -1622,6 +1622,34 @@ async def run_server(
             )
             server = uvicorn.Server(config)
 
+            # SIGHUP watcher - triggers store rescan on systemd reload
+            sighup_event = asyncio.Event()
+
+            def sighup_callback():
+                logger.info("SIGHUP received, triggering store rescan...")
+                sighup_event.set()
+
+            # Register async-safe SIGHUP handler
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGHUP, sighup_callback)
+
+            async def sighup_watcher():
+                """Watch for SIGHUP and trigger store rescan."""
+                while True:
+                    await sighup_event.wait()
+                    sighup_event.clear()
+                    if _store_manager:
+                        logger.info("Triggering store rescan due to SIGHUP...")
+                        try:
+                            await _store_manager.scan_once()
+                            if _store_manager.tracker_url:
+                                await _store_manager.delta_sync_packages()
+                            logger.info("SIGHUP rescan complete")
+                        except Exception as e:
+                            logger.error(f"SIGHUP rescan failed: {e}")
+                    else:
+                        logger.warning("No store manager, ignoring SIGHUP")
+
             # Run server, tracker sync, store scanning, and stats persistence concurrently
             # (delta sync is now integrated into periodic scan)
             async with asyncio.TaskGroup() as tg:
@@ -1632,6 +1660,8 @@ async def run_server(
                     tg.create_task(_store_manager.run_periodic_scan())
                 # Save dashboard stats every 60 seconds
                 tg.create_task(_run_periodic_stats_save(interval=60))
+                # SIGHUP watcher for systemd reload
+                tg.create_task(sighup_watcher())
 
         except asyncio.CancelledError:
             logger.info("Shutting down...")
@@ -1704,6 +1734,7 @@ def main():
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
+    # Note: SIGHUP is handled asynchronously in run_server() via loop.add_signal_handler()
 
     try:
         asyncio.run(run_server(
